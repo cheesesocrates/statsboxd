@@ -19,26 +19,13 @@ app.secret_key = 'super_secret_statsboxd_key'  # Needed for session
 data_engine = DataEngine()
 scraper = Scraper()
 
-# Path to store per-user data temporarily (or just use session/memory)
-# For this demo, let's use a simple global dict or a local json file "user_data.json"
-# Global is bad for production but fine for a single-user local demo. 
-# Let's use a file so it persists restart.
-USER_DATA_FILE = "user_data.json"
-
-def load_user_data():
-    if os.path.exists(USER_DATA_FILE):
-        with open(USER_DATA_FILE, 'r') as f:
-            return json.load(f)
-    return {}
-
-def save_user_data(data):
-    with open(USER_DATA_FILE, 'w') as f:
-        json.dump(data, f)
+# Runtime storage (In-memory)
+# Data will be lost on server restart/cold boot
+RUNTIME_DB = {}
 
 @app.route('/')
 def home():
-    # Load data if exists
-    user_data = load_user_data()
+    user_data = RUNTIME_DB
     watched_movies = user_data.get('watched', [])
     stats = data_engine.analyze_profile(watched_movies)
     
@@ -59,31 +46,28 @@ def refresh_data():
     # Analyze and save
     stats = data_engine.analyze_profile(watched_movies)
     
-    user_data = {
+    # Update Runtime DB
+    RUNTIME_DB.clear() # Clear old data
+    RUNTIME_DB.update({
         "username": username,
         "watched": watched_movies,
         "last_updated": "Just now",
         "stats": stats
-    }
-    save_user_data(user_data)
+    })
     
     return jsonify({"status": "success", "message": f"Scraped {len(watched_movies)} films"})
 
 @app.route('/api/quiz')
 def get_quiz():
-    user_data = load_user_data()
-    watched_movies = user_data.get('watched', [])
+    watched_movies = RUNTIME_DB.get('watched', [])
     quiz = data_engine.get_quiz_question(watched_movies)
     return jsonify(quiz)
 
 @app.route('/api/recommendations')
 def recommendations():
-    # Only use local watched movies
-    data = load_user_data()
-    watched = data.get('watched', [])
+    watched = RUNTIME_DB.get('watched', [])
     watched_titles = [m['title'] for m in watched]
 
-    # Get top genres from current analysis
     profile = data_engine.analyze_profile(watched)
     recs = data_engine.get_recommendations(profile['top_genres'], watched_titles)
 
