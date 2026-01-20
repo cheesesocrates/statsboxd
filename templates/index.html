@@ -1,0 +1,280 @@
+{% extends 'base.html' %}
+
+{% block content %}
+
+<!-- Header / Search -->
+<section class="flex flex-col md:flex-row gap-4 justify-between items-end border-b border-gray-800 pb-8">
+    <div class="w-full md:w-1/2">
+        <h2 class="text-3xl font-bold text-white mb-2">My Diary Analytics</h2>
+        <p class="text-sm font-mono opacity-60">Scraping last 365 days of film history.</p>
+    </div>
+    <div class="w-full md:w-auto flex gap-2">
+        <input type="text" id="username-input" placeholder="Letterboxd Username" 
+               class="bg-card border border-gray-700 text-white px-4 py-2 font-mono text-sm rounded-none focus:outline-none focus:border-accent w-full md:w-64">
+        <button onclick="fetchData()" id="scrape-btn"
+                class="bg-accent hover:bg-accentDark text-black font-mono font-bold uppercase px-6 py-2 transition-colors">
+            SYNC_DATA
+        </button>
+    </div>
+</section>
+
+<!-- Stats Grid -->
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-6">
+    
+    <!-- Module A: Cinema Graph (Heatmap) -->
+    <!-- Spans 2 columns -->
+    <div class="lg:col-span-2 bg-card rounded-lg p-6 border border-gray-800">
+        <div class="flex justify-between items-center mb-6">
+            <h3 class="font-mono text-white text-lg">CINEMA GRAPH</h3>
+            <div class="text-xs font-mono flex gap-2 items-center">
+                <span>LESS</span>
+                <div class="w-3 h-3 bg-heat0"></div>
+                <div class="w-3 h-3 bg-heat1"></div>
+                <div class="w-3 h-3 bg-heat2"></div>
+                <div class="w-3 h-3 bg-heat3"></div>
+                <span>MORE</span>
+            </div>
+        </div>
+        
+        <!-- Heatmap Grid (52 cols x 7 rows) -->
+        <div class="overflow-x-auto pb-2">
+            <div id="heatmap-grid" class="grid grid-rows-7 grid-flow-col gap-1 w-max">
+                <!-- JS will populate this -->
+            </div>
+        </div>
+        
+        <div class="mt-4 flex justify-between font-mono text-xs text-textMain">
+            <div>TOTAL: <span id="stat-total" class="text-white">{{ stats.total_films }}</span> FILMS</div>
+            <div>AVG RATING: <span id="stat-avg" class="text-white">{{ stats.average_rating }}</span></div>
+        </div>
+    </div>
+
+    <!-- Module B: Genre Analysis -->
+    <div class="bg-card rounded-lg p-6 border border-gray-800 flex flex-col h-full">
+        <h3 class="font-mono text-white text-lg mb-6">TOP GENRES</h3>
+        <div id="genre-chart" class="flex-grow flex flex-col justify-center space-y-6">
+            {% if stats.top_genres %}
+                {% for genre, count in stats.top_genres %}
+                <div>
+                    <div class="flex justify-between text-xs font-mono mb-1">
+                        <span class="text-white font-bold uppercase">{{ genre }}</span>
+                        <span>{{ count }}</span>
+                    </div>
+                    <div class="w-full bg-gray-800 h-2 rounded-full overflow-hidden">
+                        <div class="h-full 
+                            {% if loop.index == 1 %}bg-pink-500{% elif loop.index == 2 %}bg-cyan-400{% else %}bg-orange-400{% endif %}" 
+                            style="width: {{ (count / stats.total_films * 100) * 2 }}%"></div> <!-- Approximate scale -->
+                    </div>
+                </div>
+                {% endfor %}
+            {% else %}
+                <p class="text-center font-mono opacity-50">No data available.</p>
+            {% endif %}
+        </div>
+    </div>
+</div>
+
+<!-- Row 2 -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-6 h-96"> <!-- Fixed height for alignment -->
+
+    <!-- Module C: Quiz Tab -->
+    <div class="glass-panel rounded-lg p-8 flex flex-col justify-center items-center text-center relative overflow-hidden group">
+        <div class="z-10 w-full max-w-md">
+            <h3 class="font-mono text-accent text-sm mb-4">TRIVIA // QUIZ</h3>
+            
+            <div id="quiz-container">
+                <div class="animate-pulse font-mono text-sm opacity-50">Loading Quiz...</div>
+            </div>
+        </div>
+        
+        <!-- Background Poster Blur -->
+        <div id="quiz-bg" class="absolute inset-0 z-0 opacity-10 bg-cover bg-center transition-opacity duration-700"></div>
+    </div>
+
+    <!-- Module D: Recommendations -->
+    <div class="bg-card rounded-lg p-6 border border-gray-800 flex flex-col">
+        <h3 class="font-mono text-white text-lg mb-4">RECOMMENDATIONS <span class="text-xs opacity-50 ml-2">BASED ON YOUR TASTE</span></h3>
+        
+        <div id="recs-container" class="flex-grow flex gap-4 overflow-x-auto items-center p-2 snap-x">
+             <!-- JS populated -->
+             <div class="text-center w-full font-mono text-sm opacity-50">Sync data to unlock recommendations.</div>
+        </div>
+    </div>
+
+</div>
+
+{% endblock %}
+
+{% block scripts %}
+<script>
+    // --- Data from Server (Jinja injection for initial load) ---
+    const initialHeatmap = {{ stats.heatmap_data | tojson | safe }};
+    
+    document.addEventListener('DOMContentLoaded', () => {
+        renderHeatmap(initialHeatmap);
+        loadQuiz(); // Load a fresh quiz on load
+        loadRecommendations();
+    });
+
+    // --- Module A: Heatmap Logic ---
+    function renderHeatmap(data) {
+        const grid = document.getElementById('heatmap-grid');
+        grid.innerHTML = '';
+        
+        // Generate last 365 days
+        const today = new Date();
+        const oneYearAgo = new Date();
+        oneYearAgo.setDate(today.getDate() - 364);
+        
+        // We need 52 cols x 7 rows = 364 days roughly
+        // Let's just loop 0 to 365
+        for (let i = 0; i < 365; i++) {
+            const d = new Date(oneYearAgo);
+            d.setDate(d.getDate() + i);
+            const dateStr = d.toISOString().split('T')[0];
+            
+            const count = data[dateStr] || 0;
+            const div = document.createElement('div');
+            
+            // Tailwind classes for 10px square with radius
+            div.className = `w-3 h-3 rounded-sm transition-colors duration-200 hover:border hover:border-white`;
+            
+            // Color logic
+            if (count === 0) div.classList.add('bg-heat0');
+            else if (count === 1) div.classList.add('bg-heat1');
+            else if (count === 2) div.classList.add('bg-heat2');
+            else div.classList.add('bg-heat3');
+            
+            div.title = `${dateStr}: ${count} films`;
+            grid.appendChild(div);
+        }
+    }
+
+    // --- Scrape Logic ---
+    async function fetchData() {
+        const btn = document.getElementById('scrape-btn');
+        const input = document.getElementById('username-input');
+        const username = input.value.trim();
+        
+        if (!username) return alert("Please enter a username");
+        
+        btn.textContent = "SYNCING...";
+        btn.disabled = true;
+        
+        try {
+            const response = await fetch('/api/refresh', {
+                method: 'POST',
+                headers: {'Content-Type': 'application/json'},
+                body: JSON.stringify({ username })
+            });
+            const result = await response.json();
+            
+            if (response.ok) {
+                location.reload(); // Simplest way to refresh all jinja stats
+            } else {
+                alert("Error: " + result.message);
+                btn.textContent = "SYNC_DATA";
+                btn.disabled = false;
+            }
+        } catch (e) {
+            console.error(e);
+            alert("Network Error");
+            btn.textContent = "SYNC_DATA";
+            btn.disabled = false;
+        }
+    }
+
+    // --- Module C: Quiz Logic ---
+    async function loadQuiz() {
+        const container = document.getElementById('quiz-container');
+        const bg = document.getElementById('quiz-bg');
+        
+        try {
+            const res = await fetch('/api/quiz');
+            const data = await res.json();
+            
+            // Set Background
+            if (data.poster_url) {
+                bg.style.backgroundImage = `url('${data.poster_url}')`;
+            }
+            
+            let html = `
+                <h4 class="text-xl md:text-2xl font-bold text-white mb-6 leading-tight">"${data.question}"</h4>
+                <div class="grid grid-cols-2 gap-3 w-full">
+            `;
+            
+            data.options.forEach((opt, idx) => {
+                html += `
+                    <button onclick="checkAnswer(this, ${idx}, ${data.correct_index})" 
+                        class="bg-gray-800/80 hover:bg-gray-700/90 text-white font-mono text-sm py-3 px-4 rounded border border-gray-600 transition-all">
+                        ${opt}
+                    </button>
+                `;
+            });
+            
+            html += `</div>`;
+            
+            // Add "Next Question" helper invisible initially
+            html += `<button onclick="loadQuiz()" id="next-q-btn" class="mt-6 text-xs font-mono text-accent opacity-0 hover:underline">NEXT QUESTION -></button>`;
+            
+            container.innerHTML = html;
+            
+        } catch (e) {
+            container.innerHTML = '<p class="text-red-500">Failed to load quiz.</p>';
+        }
+    }
+    
+    window.checkAnswer = (btn, selectedIdx, correctIdx) => {
+        const allBtns = btn.parentElement.querySelectorAll('button');
+        allBtns.forEach(b => b.disabled = true);
+        
+        if (selectedIdx === correctIdx) {
+            btn.classList.remove('bg-gray-800/80', 'border-gray-600');
+            btn.classList.add('bg-accent', 'text-black', 'border-accent', 'font-bold');
+        } else {
+            btn.classList.remove('bg-gray-800/80', 'border-gray-600');
+            btn.classList.add('bg-red-500', 'text-white', 'border-red-500');
+            
+            // Highlight correct one
+            allBtns[correctIdx].classList.remove('bg-gray-800/80', 'border-gray-600');
+            allBtns[correctIdx].classList.add('bg-accent', 'text-black', 'border-accent');
+        }
+        
+        document.getElementById('next-q-btn').classList.remove('opacity-0');
+    };
+
+    // --- Module D: Recommendations Logic ---
+    async function loadRecommendations() {
+        const container = document.getElementById('recs-container');
+        
+        try {
+            const res = await fetch('/api/recommendations');
+            const recs = await res.json();
+            
+            if (recs.length === 0) return;
+            
+            container.innerHTML = '';
+            
+            recs.forEach(movie => {
+                const card = document.createElement('div');
+                card.className = "flex-none w-32 md:w-40 snap-start flex flex-col gap-2";
+                card.innerHTML = `
+                    <div class="relative aspect-[2/3] overflow-hidden rounded-md group cursor-pointer shadow-lg bg-gray-800">
+                        <img src="${movie.poster_url}" alt="${movie.title}" class="object-cover w-full h-full transform transition-transform group-hover:scale-110">
+                        <div class="absolute top-2 right-2 bg-black/80 text-accent text-xs font-mono px-1.5 py-0.5 rounded backdrop-blur">
+                            Match
+                        </div>
+                    </div>
+                    <div class="text-xs font-mono text-white truncate">${movie.title}</div>
+                    <div class="text-[10px] font-mono text-gray-500">${movie.year}</div>
+                `;
+                container.appendChild(card);
+            });
+            
+        } catch (e) {
+            console.error("Recs error", e);
+        }
+    }
+
+</script>
+{% endblock %}
