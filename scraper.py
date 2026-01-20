@@ -1,4 +1,5 @@
 import cloudscraper
+from bs4 import BeautifulSoup
 import datetime
 import json
 import os
@@ -38,69 +39,62 @@ class Scraper:
                 page_entries = []
                 for row in rows:
                     # Extract date
-                    date_cell = row.find('td', class_='td-day')
+                    # New selector: td.col-daydate -> a.daydate
+                    date_cell = row.find('td', class_='col-daydate')
                     if not date_cell: continue
                     
-                    date_str = date_cell.find('a')['href'].split('/')[-2:] # roughly year/month/day link format checks might be needed or data-date
-                    # Letterboxd diary date is usually in the format YYYY-MM-DD in the link or text
-                    # Actually, let's look for the data-date attribute or the text in the link
-                    # The link is usually /username/film/title/date/YYYY/MM/DD/
+                    date_link = date_cell.find('a')
+                    if not date_link: continue
                     
-                    # Safer way: extract from the text or other attributes
-                    # The td-day usually has <a href="...">Day Date Month Year</a>
-                    # But simpler is looking at the 'data-viewing-date' in the simplified format if present, or just parsing the link.
-                    # Let's try parsing the partial link date from the <a href>
-                    # Example href: /username/film/title/date/2024/01/20/
+                    link_href = date_link['href']
+                    # Expected href: /username/diary/films/for/YYYY/MM/DD/ 
+                    # or /username/diary/films/for/YYYY/MM/DD/page/X/ if paginated daily? No, usually just day.
                     
-                    link_href = date_cell.find('a')['href']
                     try:
                         parts = link_href.strip('/').split('/')
-                        # parts expected: [username, 'film', title, 'date', year, month, day]
-                        if 'date' in parts:
-                            idx = parts.index('date')
-                            if len(parts) >= idx + 3:
-                                y, m, d = int(parts[idx+1]), int(parts[idx+2]), int(parts[idx+3])
-                                watched_date = datetime.date(y, m, d)
-                            else:
-                                continue
+                        # parts: [username, 'diary', 'films', 'for', '2025', '01', '15']
+                        if len(parts) >= 3 and parts[-1].isdigit() and parts[-2].isdigit() and parts[-3].isdigit():
+                            y, m, d = int(parts[-3]), int(parts[-2]), int(parts[-1])
+                            watched_date = datetime.date(y, m, d)
                         else:
                             continue
                     except ValueError:
                         continue
                         
                     if watched_date < cutoff_date:
-                        # We reached past 365 days
-                        # finish this page but stop outer loop
-                        # actually we can stop immediately if we want strictly last 365 days
                         return entries + page_entries
 
-                    # Extract Title & Year
-                    # The film title is in td-film-details -> h3 -> a
-                    film_col = row.find('td', class_='td-film-details')
-                    title_link = film_col.find('h3', class_='headline-3').find('a')
-                    title = title_link.get_text(strip=True)
+                    # Extract Title
+                    # New selector: td.col-production -> h3.name -> a
+                    film_col = row.find('td', class_='col-production')
+                    title = "Unknown"
+                    if film_col:
+                        title_header = film_col.find(class_='name')
+                        if title_header:
+                            title_link = title_header.find('a')
+                            if title_link:
+                                title = title_link.get_text(strip=True)
                     
-                    # Year is often in metadata, but let's assume we might need to grab it from a separate span or just rely on DB match
-                    # Letterboxd diary usually shows release year in the row? "td-released"
-                    release_col = row.find('td', class_='td-released')
+                    # Extract Year
+                    # New selector: td.col-releaseyear
+                    release_col = row.find('td', class_='col-releaseyear')
                     year = release_col.get_text(strip=True) if release_col else ""
 
                     # Extract Rating
-                    rating_col = row.find('td', class_='td-rating')
+                    # New selector: td.col-rating -> span.rating
+                    rating_col = row.find('td', class_='col-rating')
                     rating = 0.0
                     if rating_col:
-                        # Count stars or parsing text?
-                        # Letterboxd uses unicode chars or classes "rating-5" etc.
-                        # It often has a hidden text or class. 
-                        # Class format: rating-5 (5 stars), rating-4 (4 stars), rating-3-5 (3.5 stars)
                         rating_span = rating_col.find('span', class_='rating')
                         if rating_span:
                             classes = rating_span.get('class', [])
                             for cls in classes:
                                 if cls.startswith('rated-'):
-                                    # rated-10 -> 5.0, rated-9 -> 4.5
-                                    val = int(cls.split('-')[1])
-                                    rating = val / 2.0
+                                    try:
+                                        val = int(cls.split('-')[1])
+                                        rating = val / 2.0
+                                    except:
+                                        pass
                                     break
                     
                     entry = {
