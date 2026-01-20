@@ -79,44 +79,113 @@ class DataEngine:
         }
 
     def _get_ai_quiz(self, watched_movies):
-        # Placeholder for AI implementation
-        # In a real scenario, call OpenAI API here
-        return self._get_fallback_quiz(watched_movies) # Fallback for now until fully implemented
-
-    def get_recommendations(self, top_genres, watched_titles):
-        if self.mode == "AI" and self.openai_key:
-            return self._get_ai_recommendations(top_genres, watched_titles)
-        else:
-            return self._get_fallback_recommendations(top_genres, watched_titles)
-
-    def _get_fallback_recommendations(self, top_genres, watched_titles):
-        # Filter DB for movies that match top genres and are NOT in watched_titles
-        recs = []
-        watched_set = set(t.lower() for t in watched_titles)
-        
-        for movie in self.movies_db:
-            if movie['title'].lower() in watched_set:
-                continue
+        if not watched_movies:
+            return self._get_fallback_quiz(watched_movies)
             
-            # Check overlap in genres
-            movie_genres = set(movie.get('genre', []))
-            if not top_genres:
-                # If no top genres known, just add it (random fill later)
-                recs.append(movie)
-                continue
-
-            # If movie shares at least one genre with top_genres
-            common = movie_genres.intersection(set(top_genres))
-            if common:
-               recs.append(movie)
+        target_movie = random.choice(watched_movies)
+        title = target_movie['title']
         
-        # Return top 10 random matches
-        random.shuffle(recs)
-        return recs[:10]
+        # 1. Generate Question with OpenAI
+        from openai import OpenAI
+        client = OpenAI(api_key=self.openai_key)
+        
+        prompt = f"""
+        Generate a multiple-choice trivia question about a specific plot detail in the movie "{title}".
+        Format the output purely as JSON:
+        {{
+            "question": "The question text?",
+            "options": ["Wrong 1", "Correct Answer", "Wrong 2", "Wrong 3"],
+            "correct_answer": "Correct Answer"
+        }}
+        """
+        
+        try:
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7
+            )
+            content = response.choices[0].message.content
+            # Clean possible markdown code blocks
+            content = content.replace("```json", "").replace("```", "").strip()
+            data = json.loads(content)
+            
+            question = data['question']
+            options = data['options']
+            correct_ans = data['correct_answer']
+            
+            # Shuffle options
+            random.shuffle(options)
+            correct_index = options.index(correct_ans)
+            
+            # 2. Get Poster from TMDB
+            poster_url = self._get_tmdb_poster(title)
+            
+            return {
+                "question": question,
+                "options": options,
+                "correct_index": correct_index,
+                "movie_title": title,
+                "poster_url": poster_url
+            }
+
+        except Exception as e:
+            print(f"AI Quiz Error: {e}")
+            return self._get_fallback_quiz(watched_movies)
+
+    def _get_tmdb_poster(self, title):
+        if not self.tmdb_key:
+            return "https://via.placeholder.com/300x450?text=No+Poster"
+            
+        from tmdbv3api import TMDb, Movie
+        tmdb = TMDb()
+        tmdb.api_key = self.tmdb_key
+        movie_api = Movie()
+        
+        try:
+            search = movie_api.search(title)
+            if search:
+                # Get first result
+                path = search[0].poster_path
+                return f"https://image.tmdb.org/t/p/w500{path}"
+        except Exception:
+            pass
+        
+        return "https://via.placeholder.com/300x450?text=No+Poster"
 
     def _get_ai_recommendations(self, top_genres, watched_titles):
-        # Placeholder for AI implementation
-        return self._get_fallback_recommendations(top_genres, watched_titles)
+        from openai import OpenAI
+        client = OpenAI(api_key=self.openai_key)
+        
+        watched_sample = ", ".join(watched_titles[:20]) # Limit context
+        genres_str = ", ".join(top_genres)
+        
+        prompt = f"""
+        I like movies in these genres: {genres_str}.
+        I have already watched: {watched_sample}.
+        Recommend 5 distinct, highly-rated movies I might like that are NOT in my watched list.
+        Return ONLY a JSON list of strings: ["Movie A", "Movie B", ...]
+        """
+        
+        try:
+            response = client.chat.completions.create(
+                model="gpt-3.5-turbo",
+                messages=[{"role": "user", "content": prompt}],
+                temperature=0.7
+            )
+            content = response.choices[0].message.content.replace("```json", "").replace("```", "").strip()
+            titles = json.loads(content)
+            
+            recs = []
+            for t in titles:
+                 poster = self._get_tmdb_poster(t)
+                 recs.append({"title": t, "year": "Rec", "poster_url": poster})
+                 
+            return recs
+
+        except Exception as e:
+            print(f"AI Recs Error: {e}")
+            return self._get_fallback_recommendations(top_genres, watched_titles)
 
     def analyze_profile(self, watched_movies):
         """
