@@ -98,46 +98,58 @@ class DataEngine:
         
         return "https://via.placeholder.com/300x450?text=No+Poster"
 
-    def get_recommendations(self, top_genres, watched_titles):
-        # Use local DB intersection for selection, but TMDB for posters
-        recs = []
-        watched_set = set(t.lower() for t in watched_titles)
+    def _hydrate_with_tmdb(self, movies):
+        """
+        Updates the passed list of movies in-place with Genres and Poster URLs from TMDB.
+        """
+        if not self.tmdb_key: return
         
-        # Filter logic
-        candidates = []
-        for movie in self.movies_db:
-             if movie['title'].lower() in watched_set:
+        from tmdbv3api import TMDb, Movie, Genre
+        tmdb = TMDb()
+        tmdb.api_key = self.tmdb_key
+        movie_api = Movie()
+        genre_api = Genre()
+        
+        try:
+            genres_list = genre_api.movie_list()
+            if isinstance(genres_list, list):
+                genre_map = {g['id']: g['name'] for g in genres_list}
+            elif hasattr(genres_list, 'genres'):
+                 genre_map = {g['id']: g['name'] for g in genres_list.genres}
+            else:
+                 genre_map = {}
+        except:
+            genre_map = {}
+
+        print("Hydrating movies with TMDB data...")
+        for movie in movies:
+            if movie.get('genre') != ['Uncategorized'] and movie.get('poster_url'):
                 continue
-             
-             movie_genres = set(movie.get('genre', []))
-             if not top_genres:
-                 candidates.append(movie)
-                 continue
-                 
-             if movie_genres.intersection(set(top_genres)):
-                 candidates.append(movie)
-        
-        # Shuffle and pick top 10
-        random.shuffle(candidates)
-        selected = candidates[:10]
-        
-        # Hydrate with TMDB posters
-        final_recs = []
-        for m in selected:
-            # We preferentially use the TMDB poster if available, otherwise keep local
-            tmdb_poster = self._get_tmdb_poster(m['title'])
-            final_recs.append({
-                "title": m['title'],
-                "year": m['year'],
-                "poster_url": tmdb_poster if "via.placeholder.com" not in tmdb_poster else m['poster_url']
-            })
-            
-        return final_recs
+            try:
+                results = movie_api.search(movie['title'])
+                target_year = movie['year']
+                match = None
+                if results:
+                    if target_year:
+                        for r in results:
+                            if hasattr(r, 'release_date') and str(target_year) in r.release_date:
+                                match = r
+                                break
+                    if not match: match = results[0]
+                    
+                    if match:
+                         if hasattr(match, 'poster_path') and match.poster_path:
+                             movie['poster_url'] = f"https://image.tmdb.org/t/p/w500{match.poster_path}"
+                         if hasattr(match, 'genre_ids') and genre_map:
+                             real_genres = [genre_map.get(gid) for gid in match.genre_ids if gid in genre_map]
+                             if real_genres:
+                                 movie['genre'] = real_genres
+            except Exception as e:
+                pass
 
     def analyze_profile(self, watched_movies):
         """
-        Analyzes the watched movies to return statistics.
-        Also hydrates the movies with TMDB data (Genres/Posters) if possible.
+        Analyzes statistics and hydrates data.
         """
         if not watched_movies:
             return {
@@ -147,7 +159,6 @@ class DataEngine:
                 "heatmap_data": {}
             }
             
-        # Hydrate data with TMDB if key is available
         if self.tmdb_key:
             self._hydrate_with_tmdb(watched_movies)
             
@@ -159,19 +170,21 @@ class DataEngine:
         genre_counts = {}
         for m in watched_movies:
             for g in m.get('genre', []):
-                # Filter out 'Uncategorized' if we have real data
-                if g == 'Uncategorized' and len(m.get('genre', [])) > 1:
-                    continue
+                if g == 'Uncategorized' and len(m.get('genre', [])) > 1: continue
                 genre_counts[g] = genre_counts.get(g, 0) + 1
-                
-        # Sort genres by count
         sorted_genres = sorted(genre_counts.items(), key=lambda x: x[1], reverse=True)[:3]
         
-        # Heatmap Data (Date -> Count)
+        # Heatmap Data (Last 365 Days only)
+        import datetime
+        cutoff = datetime.date.today() - datetime.timedelta(days=365)
         heatmap_data = {}
         for m in watched_movies:
-            d = m['date']
-            heatmap_data[d] = heatmap_data.get(d, 0) + 1
+            try:
+                d_obj = datetime.datetime.strptime(m['date'], "%Y-%m-%d").date()
+                if d_obj >= cutoff:
+                    heatmap_data[m['date']] = heatmap_data.get(m['date'], 0) + 1
+            except:
+                pass
             
         return {
             "total_films": total_films,
@@ -180,70 +193,144 @@ class DataEngine:
             "heatmap_data": heatmap_data
         }
 
-    def _hydrate_with_tmdb(self, movies):
+    def get_recommendations(self, top_genres, watched_titles):
         """
-        Updates the passed list of movies in-place with Genres and Poster URLs from TMDB.
-        Fetching is done only if necessary to save API calls, but for a sync we might do a batch.
+        Get recommendations filtering out watched movies strictly.
         """
-        from tmdbv3api import TMDb, Movie, Genre
-        tmdb = TMDb()
-        tmdb.api_key = self.tmdb_key
-        movie_api = Movie()
-        genre_api = Genre()
+        import re
+        def normalize(t): return re.sub(r'[^a-z0-9]', '', t.lower())
+            
+        rec_candidates = []
+        watched_set = set(normalize(t) for t in watched_titles)
         
-        # Get Genre Map once
-        try:
-            genres_list = genre_api.movie_list()
-            # Handle different return types from library versions
-            if isinstance(genres_list, list):
-                genre_map = {g['id']: g['name'] for g in genres_list}
-            elif hasattr(genres_list, 'genres'):
-                 genre_map = {g['id']: g['name'] for g in genres_list.genres}
-            else:
-                 genre_map = {}
-        except:
-            genre_map = {}
+        for movie in self.movies_db:
+             if normalize(movie['title']) in watched_set:
+                continue
+             
+             movie_genres = set(movie.get('genre', []))
+             if not top_genres:
+                 rec_candidates.append(movie)
+                 continue
+                 
+             top_genre_names = set(g[0] for g in top_genres)
+             if movie_genres.intersection(top_genre_names):
+                 rec_candidates.append(movie)
+        
+        random.shuffle(rec_candidates)
+        selected = rec_candidates[:10]
+        
+        final_recs = []
+        for m in selected:
+            tmdb_poster = self._get_tmdb_poster(m['title'])
+            final_recs.append({
+                "title": m['title'],
+                "year": m['year'],
+                "poster_url": tmdb_poster if "via.placeholder.com" not in tmdb_poster else m['poster_url']
+            })
+            
+        return final_recs
 
-        print("Hydrating movies with TMDB data...")
+    # --- Filmle Game Logic ---
+    
+    def start_filmle(self):
+        if not self.movies_db: return {"error": "No database"}
+        target = random.choice(self.movies_db)
+        tmdb_data = self._fetch_tmdb_details(target['title'], target['year'])
         
-        # Limit to last 20 for speed in demo, or full sync if robust
-        # Let's do a safe iteration.
-        for movie in movies:
-            # Skip if already hydrated (simple check: genre is not Uncategorized)
-            if movie.get('genre') != ['Uncategorized'] and movie.get('poster_url'):
-                continue
-                
-            try:
-                # Search by title and year if possible
-                results = movie_api.search(movie['title'])
-                
-                # Filter by year if we have it to be precise
-                target_year = movie['year']
-                match = None
-                
-                if results:
-                    if target_year:
-                        # Try to match year
-                        for r in results:
-                            if hasattr(r, 'release_date') and str(target_year) in r.release_date:
-                                match = r
-                                break
-                    
-                    # Fallback to first result
-                    if not match:
-                        match = results[0]
-                        
-                    # Update Metadata
-                    if match:
-                         # Poster
-                         if hasattr(match, 'poster_path') and match.poster_path:
-                             movie['poster_url'] = f"https://image.tmdb.org/t/p/w500{match.poster_path}"
-                         
-                         # Genres
-                         if hasattr(match, 'genre_ids') and genre_map:
-                             real_genres = [genre_map.get(gid) for gid in match.genre_ids if gid in genre_map]
-                             if real_genres:
-                                 movie['genre'] = real_genres
-            except Exception as e:
-                print(f"Failed to hydrate {movie['title']}: {e}")
-                continue
+        self.current_game = {
+            "target_title": target['title'],
+            "target_year": target['year'],
+            "target_genre": target.get('genre', []),
+            "tmdb_data": tmdb_data,
+            "guesses": [],
+            "max_guesses": 6,
+            "solved": False
+        }
+        return {
+            "message": "Game Started",
+            "year": target['year'],
+            "genre": target['genre'][:2],
+            "max_guesses": 6
+        }
+
+    def guess_filmle(self, guess_title):
+        if not hasattr(self, 'current_game') or not self.current_game:
+            return {"error": "No game active"}
+            
+        game = self.current_game
+        target_title = game['target_title']
+        
+        import re
+        def normalize(t): return re.sub(r'[^a-z0-9]', '', t.lower())
+        
+        is_match = normalize(guess_title) == normalize(target_title)
+        
+        feedback = {
+            "guess": guess_title,
+            "is_match": is_match,
+            "remaining_guesses": game['max_guesses'] - len(game['guesses']) - 1
+        }
+        
+        if is_match:
+            game['solved'] = True
+            feedback['details'] = game['tmdb_data']
+            return feedback
+            
+        game['guesses'].append(guess_title)
+        
+        # Hints
+        guess_obj = next((m for m in self.movies_db if normalize(m['title']) == normalize(guess_title)), None)
+        if guess_obj:
+            diff_year = int(guess_obj['year']) - int(game['target_year']) if guess_obj['year'] and game['target_year'] else 0
+            feedback['hint_year'] = "✅" if diff_year == 0 else ("⬇️ Too New" if diff_year > 0 else "⬆️ Too Old")
+            feedback['hint_year_val'] = guess_obj['year']
+            
+            guess_genres = set(guess_obj.get('genre', []))
+            target_genres = set(game['target_genre'])
+            overlap = guess_genres.intersection(target_genres)
+            feedback['hint_genre'] = list(overlap) if overlap else "❌ No Match"
+        else:
+             feedback['note'] = "Unknown movie"
+
+        # Clues
+        idx = len(game['guesses'])
+        if idx == 1 and game['tmdb_data'].get('director'):
+             feedback['new_clue'] = f"🎥 Director: {game['tmdb_data']['director']}"
+        elif idx == 2 and game['tmdb_data'].get('cast'):
+             feedback['new_clue'] = f"⭐ Starring: {', '.join(game['tmdb_data']['cast'][:2])}"
+        elif idx == 3 and game['tmdb_data'].get('tagline'):
+             feedback['new_clue'] = f"📢 Tagline: {game['tmdb_data']['tagline']}"
+        elif idx >= 5:
+             feedback['game_over'] = True
+             feedback['target'] = target_title
+             
+        return feedback
+
+    def _fetch_tmdb_details(self, title, year=None):
+        from tmdbv3api import TMDb, Movie
+        formatted = {}
+        if not self.tmdb_key: return formatted
+        
+        movie_api = Movie()
+        try:
+             results = movie_api.search(title)
+             for r in results:
+                 if year and hasattr(r, 'release_date') and str(year) in r.release_date:
+                     match = r
+                     break
+             else:
+                 match = results[0] if results else None
+                 
+             if match:
+                 details = movie_api.details(match.id)
+                 formatted['poster_path'] = details.poster_path
+                 formatted['tagline'] = getattr(details, 'tagline', '')
+                 casts = getattr(details, 'casts', {})
+                 if casts:
+                     crew = casts.get('crew', [])
+                     formatted['director'] = next((c['name'] for c in crew if c['job'] == 'Director'), 'Unknown')
+                     cast = casts.get('cast', [])
+                     formatted['cast'] = [c['name'] for c in cast[:3]]
+        except:
+             pass
+        return formatted

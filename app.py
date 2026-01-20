@@ -68,17 +68,28 @@ def get_quiz():
     return jsonify(quiz)
 
 @app.route('/api/recommendations')
-def get_recommendations():
-    user_data = load_user_data()
-    watched_movies = user_data.get('watched', [])
-    stats = user_data.get('stats', {})
-    top_genres = [g[0] for g in stats.get('top_genres', [])]
-    
-    # Pass just titles for filtering
-    watched_titles = [m['title'] for m in watched_movies]
-    
-    recs = data_engine.get_recommendations(top_genres, watched_titles)
+def recommendations():
+    # Only use local watched movies
+    data = load_user_data()
+    watched = data.get('watched', [])
+    watched_titles = [m['title'] for m in watched]
+
+    # Get top genres from current analysis
+    profile = data_engine.analyze_profile(watched)
+    recs = data_engine.get_recommendations(profile['top_genres'], watched_titles)
+
     return jsonify(recs)
+
+# --- Filmle Game Routes ---
+@app.route('/api/game/start', methods=['POST'])
+def start_game():
+    return jsonify(data_engine.start_filmle())
+
+@app.route('/api/game/guess', methods=['POST'])
+def guess_game():
+    data = request.json
+    guess = data.get('guess', '')
+    return jsonify(data_engine.guess_filmle(guess))
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
