@@ -10,9 +10,8 @@ class DataEngine:
     def __init__(self, movies_path='movies.json'):
         self.movies_path = movies_path
         self.movies_db = self._load_movies_db()
-        self.openai_key = os.getenv("OPENAI_API_KEY")
         self.tmdb_key = os.getenv("TMDB_API_KEY")
-        self.mode = "AI" if (self.openai_key and self.tmdb_key) else "FALLBACK"
+        self.mode = "LIVE" if self.tmdb_key else "OFFLINE"
         print(f"DataEngine initialized in {self.mode} mode.")
 
     def _load_movies_db(self):
@@ -32,30 +31,29 @@ class DataEngine:
             "poster_url": str
         }
         """
-        if self.mode == "AI" and self.openai_key:
-            return self._get_ai_quiz(watched_movies)
-        else:
-            return self._get_fallback_quiz(watched_movies)
+        # Always use the Rating Quiz logic
+        return self._get_rating_quiz(watched_movies)
 
-    def _get_fallback_quiz(self, watched_movies):
-        # Default quiz: "You watched [Title]. What star rating did you give it?"
-        # If we have scraped data (watched_movies), use it. otherwise use random from DB.
-        
+    def _get_rating_quiz(self, watched_movies):
         target_movie = None
-        user_rating = None
         
         if watched_movies and len(watched_movies) > 0:
             target_movie = random.choice(watched_movies)
-            # Find poster in DB if possible
-            db_match = next((m for m in self.movies_db if m['title'].lower() == target_movie['title'].lower()), None)
-            poster_url = db_match['poster_url'] if db_match else "https://via.placeholder.com/300x450?text=No+Poster"
             user_rating = target_movie['rating']
         else:
             # If no watched data, pick random from DB and pretend
             target_movie = random.choice(self.movies_db)
-            poster_url = target_movie['poster_url']
             user_rating = random.choice([3.0, 3.5, 4.0, 4.5, 5.0]) # Mock rating
             target_movie['rating'] = user_rating
+
+        # Try to get real poster if TMDB key exists
+        poster_url = self._get_tmdb_poster(target_movie['title'])
+        
+        # If TMDB failed or no key, check local DB for fallback
+        if "via.placeholder.com" in poster_url:
+             db_match = next((m for m in self.movies_db if m['title'].lower() == target_movie['title'].lower()), None)
+             if db_match:
+                 poster_url = db_match['poster_url']
 
         question = f"You watched '{target_movie['title']}'. What star rating did you give it?"
         
@@ -78,61 +76,6 @@ class DataEngine:
             "poster_url": poster_url
         }
 
-    def _get_ai_quiz(self, watched_movies):
-        if not watched_movies:
-            return self._get_fallback_quiz(watched_movies)
-            
-        target_movie = random.choice(watched_movies)
-        title = target_movie['title']
-        
-        # 1. Generate Question with OpenAI
-        from openai import OpenAI
-        client = OpenAI(api_key=self.openai_key)
-        
-        prompt = f"""
-        Generate a multiple-choice trivia question about a specific plot detail in the movie "{title}".
-        Format the output purely as JSON:
-        {{
-            "question": "The question text?",
-            "options": ["Wrong 1", "Correct Answer", "Wrong 2", "Wrong 3"],
-            "correct_answer": "Correct Answer"
-        }}
-        """
-        
-        try:
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7
-            )
-            content = response.choices[0].message.content
-            # Clean possible markdown code blocks
-            content = content.replace("```json", "").replace("```", "").strip()
-            data = json.loads(content)
-            
-            question = data['question']
-            options = data['options']
-            correct_ans = data['correct_answer']
-            
-            # Shuffle options
-            random.shuffle(options)
-            correct_index = options.index(correct_ans)
-            
-            # 2. Get Poster from TMDB
-            poster_url = self._get_tmdb_poster(title)
-            
-            return {
-                "question": question,
-                "options": options,
-                "correct_index": correct_index,
-                "movie_title": title,
-                "poster_url": poster_url
-            }
-
-        except Exception as e:
-            print(f"AI Quiz Error: {e}")
-            return self._get_fallback_quiz(watched_movies)
-
     def _get_tmdb_poster(self, title):
         if not self.tmdb_key:
             return "https://via.placeholder.com/300x450?text=No+Poster"
@@ -147,45 +90,49 @@ class DataEngine:
             if search:
                 # Get first result
                 path = search[0].poster_path
-                return f"https://image.tmdb.org/t/p/w500{path}"
-        except Exception:
+                if path:
+                    return f"https://image.tmdb.org/t/p/w500{path}"
+        except Exception as e:
+            print(f"TMDB Error for {title}: {e}")
             pass
         
         return "https://via.placeholder.com/300x450?text=No+Poster"
 
-    def _get_ai_recommendations(self, top_genres, watched_titles):
-        from openai import OpenAI
-        client = OpenAI(api_key=self.openai_key)
+    def get_recommendations(self, top_genres, watched_titles):
+        # Use local DB intersection for selection, but TMDB for posters
+        recs = []
+        watched_set = set(t.lower() for t in watched_titles)
         
-        watched_sample = ", ".join(watched_titles[:20]) # Limit context
-        genres_str = ", ".join(top_genres)
-        
-        prompt = f"""
-        I like movies in these genres: {genres_str}.
-        I have already watched: {watched_sample}.
-        Recommend 5 distinct, highly-rated movies I might like that are NOT in my watched list.
-        Return ONLY a JSON list of strings: ["Movie A", "Movie B", ...]
-        """
-        
-        try:
-            response = client.chat.completions.create(
-                model="gpt-3.5-turbo",
-                messages=[{"role": "user", "content": prompt}],
-                temperature=0.7
-            )
-            content = response.choices[0].message.content.replace("```json", "").replace("```", "").strip()
-            titles = json.loads(content)
-            
-            recs = []
-            for t in titles:
-                 poster = self._get_tmdb_poster(t)
-                 recs.append({"title": t, "year": "Rec", "poster_url": poster})
+        # Filter logic
+        candidates = []
+        for movie in self.movies_db:
+             if movie['title'].lower() in watched_set:
+                continue
+             
+             movie_genres = set(movie.get('genre', []))
+             if not top_genres:
+                 candidates.append(movie)
+                 continue
                  
-            return recs
-
-        except Exception as e:
-            print(f"AI Recs Error: {e}")
-            return self._get_fallback_recommendations(top_genres, watched_titles)
+             if movie_genres.intersection(set(top_genres)):
+                 candidates.append(movie)
+        
+        # Shuffle and pick top 10
+        random.shuffle(candidates)
+        selected = candidates[:10]
+        
+        # Hydrate with TMDB posters
+        final_recs = []
+        for m in selected:
+            # We preferentially use the TMDB poster if available, otherwise keep local
+            tmdb_poster = self._get_tmdb_poster(m['title'])
+            final_recs.append({
+                "title": m['title'],
+                "year": m['year'],
+                "poster_url": tmdb_poster if "via.placeholder.com" not in tmdb_poster else m['poster_url']
+            })
+            
+        return final_recs
 
     def analyze_profile(self, watched_movies):
         """
@@ -228,4 +175,3 @@ class DataEngine:
             "top_genres": sorted_genres,
             "heatmap_data": heatmap_data
         }
-
