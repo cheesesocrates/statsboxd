@@ -3,6 +3,7 @@ from bs4 import BeautifulSoup
 import datetime
 import json
 import os
+import logging
 
 class Scraper:
     def __init__(self, movies_path='movies.json'):
@@ -17,6 +18,7 @@ class Scraper:
         return []
 
     def scrape_user(self, username):
+        logging.info(f"Starting scrape for user: {username}")
         base_url = f"https://letterboxd.com/{username}/films/diary/"
         entries = []
         page = 1
@@ -24,22 +26,23 @@ class Scraper:
         
         while True:
             url = f"{base_url}page/{page}/"
-            print(f"Scraping {url}...")
+            logging.info(f"Scraping page {page}: {url}...")
             try:
                 response = self.scraper.get(url) # Use cloudscraper
                 if response.status_code != 200:
+                    logging.warning(f"Failed to fetch {url}, status code: {response.status_code}")
                     break
                 
                 soup = BeautifulSoup(response.text, 'html.parser')
                 rows = soup.find_all('tr', class_='diary-entry-row')
                 
                 if not rows:
+                    logging.info(f"No more rows found on page {page}. Stopping.")
                     break
 
                 page_entries = []
                 for row in rows:
                     # Extract date
-                    # New selector: td.col-daydate -> a.daydate
                     date_cell = row.find('td', class_='col-daydate')
                     if not date_cell: continue
                     
@@ -47,12 +50,9 @@ class Scraper:
                     if not date_link: continue
                     
                     link_href = date_link['href']
-                    # Expected href: /username/diary/films/for/YYYY/MM/DD/ 
-                    # or /username/diary/films/for/YYYY/MM/DD/page/X/ if paginated daily? No, usually just day.
                     
                     try:
                         parts = link_href.strip('/').split('/')
-                        # parts: [username, 'diary', 'films', 'for', '2025', '01', '15']
                         if len(parts) >= 3 and parts[-1].isdigit() and parts[-2].isdigit() and parts[-3].isdigit():
                             y, m, d = int(parts[-3]), int(parts[-2]), int(parts[-1])
                             watched_date = datetime.date(y, m, d)
@@ -62,10 +62,10 @@ class Scraper:
                         continue
                         
                     if watched_date < cutoff_date:
+                        logging.info(f"Reached cutoff date {cutoff_date} at entry {watched_date}. Stopping scrape.")
                         return entries + page_entries
 
                     # Extract Title
-                    # New selector: td.col-production -> h3.name -> a
                     film_col = row.find('td', class_='col-production')
                     title = "Unknown"
                     if film_col:
@@ -76,12 +76,10 @@ class Scraper:
                                 title = title_link.get_text(strip=True)
                     
                     # Extract Year
-                    # New selector: td.col-releaseyear
                     release_col = row.find('td', class_='col-releaseyear')
                     year = release_col.get_text(strip=True) if release_col else ""
 
                     # Extract Rating
-                    # New selector: td.col-rating -> span.rating
                     rating_col = row.find('td', class_='col-rating')
                     rating = 0.0
                     if rating_col:
@@ -106,13 +104,15 @@ class Scraper:
                     }
                     page_entries.append(entry)
                 
+                logging.info(f"Page {page}: Scraped {len(page_entries)} entries.")
                 entries.extend(page_entries)
                 page += 1
                 
             except Exception as e:
-                print(f"Error scraping page {page}: {e}")
+                logging.error(f"Error scraping page {page}: {e}")
                 break
                 
+        logging.info(f"Scrape complete. Total entries found: {len(entries)}")
         return entries
 
     def _infer_genre(self, title):

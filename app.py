@@ -3,8 +3,17 @@ from data_engine import DataEngine
 from scraper import Scraper
 import os
 import json
+import logging
+import sys
 
-app = Flask(__name__)
+# Configure logging
+logging.basicConfig(
+    stream=sys.stdout,
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+
+app = Flask(__name__) 
 app.secret_key = 'super_secret_statsboxd_key'  # Needed for session
 
 data_engine = DataEngine()
@@ -41,7 +50,7 @@ def refresh_data():
     if not username:
         return jsonify({"status": "error", "message": "Username required"}), 400
     
-    print(f"Scraping for {username}...")
+    logging.info(f"Scraping for {username}...")
     watched_movies = scraper.scrape_user(username)
     
     if not watched_movies:

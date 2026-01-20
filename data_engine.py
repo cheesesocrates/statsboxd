@@ -1,6 +1,7 @@
 import os
 import json
 import random
+import logging
 from dotenv import load_dotenv
 
 # Load env variables from .env if present
@@ -12,7 +13,7 @@ class DataEngine:
         self.movies_db = self._load_movies_db()
         self.tmdb_key = os.getenv("TMDB_API_KEY")
         self.mode = "LIVE" if self.tmdb_key else "OFFLINE"
-        print(f"DataEngine initialized in {self.mode} mode.")
+        logging.info(f"DataEngine initialized in {self.mode} mode.")
 
     def _load_movies_db(self):
         if os.path.exists(self.movies_path):
@@ -102,7 +103,8 @@ class DataEngine:
         """
         Updates the passed list of movies in-place with Genres and Poster URLs from TMDB.
         """
-        if not self.tmdb_key: return
+        if not self.tmdb_key: 
+            return
         
         from tmdbv3api import TMDb, Movie, Genre
         tmdb = TMDb()
@@ -118,14 +120,19 @@ class DataEngine:
                  genre_map = {g['id']: g['name'] for g in genres_list.genres}
             else:
                  genre_map = {}
-        except:
+        except Exception as e:
+            logging.error(f"Failed to fetch genre map: {e}")
             genre_map = {}
 
-        print("Hydrating movies with TMDB data...")
+        logging.info("Hydrating movies with TMDB data...")
+        hydrated_count = 0
+        
         for movie in movies:
             if movie.get('genre') != ['Uncategorized'] and movie.get('poster_url'):
                 continue
             try:
+                # Log only verbose debug if needed, or just info on success
+                # logging.debug(f"Hydrating {movie['title']}...")
                 results = movie_api.search(movie['title'])
                 target_year = movie['year']
                 match = None
@@ -138,19 +145,28 @@ class DataEngine:
                     if not match: match = results[0]
                     
                     if match:
+                         updated = False
                          if hasattr(match, 'poster_path') and match.poster_path:
                              movie['poster_url'] = f"https://image.tmdb.org/t/p/w500{match.poster_path}"
+                             updated = True
                          if hasattr(match, 'genre_ids') and genre_map:
                              real_genres = [genre_map.get(gid) for gid in match.genre_ids if gid in genre_map]
                              if real_genres:
                                  movie['genre'] = real_genres
+                                 updated = True
+                         if updated: hydrated_count += 1
             except Exception as e:
+                logging.warning(f"Error hydrating {movie['title']}: {e}")
                 pass
+        
+        logging.info(f"Hydration complete. Updated {hydrated_count} movies.")
 
     def analyze_profile(self, watched_movies):
         """
         Analyzes statistics and hydrates data.
         """
+        logging.info(f"Analyzing profile for {len(watched_movies) if watched_movies else 0} movies.")
+        
         if not watched_movies:
             return {
                 "total_films": 0,
@@ -173,6 +189,8 @@ class DataEngine:
                 if g == 'Uncategorized' and len(m.get('genre', [])) > 1: continue
                 genre_counts[g] = genre_counts.get(g, 0) + 1
         sorted_genres = sorted(genre_counts.items(), key=lambda x: x[1], reverse=True)[:3]
+        
+        logging.info(f"Analysis done. Avg Rating: {average_rating}, Top Genres: {sorted_genres}")
         
         # Heatmap Data (Last 365 Days only)
         import datetime
