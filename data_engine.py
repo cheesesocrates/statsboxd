@@ -136,11 +136,8 @@ class DataEngine:
 
     def analyze_profile(self, watched_movies):
         """
-        Analyzes the watched movies to return:
-        - total_films
-        - average_rating
-        - top_genres: [("Drama", 15), ("Comedy", 10), ...]
-        - heatmap_data: { "2024-01-01": 2, ... }
+        Analyzes the watched movies to return statistics.
+        Also hydrates the movies with TMDB data (Genres/Posters) if possible.
         """
         if not watched_movies:
             return {
@@ -150,6 +147,10 @@ class DataEngine:
                 "heatmap_data": {}
             }
             
+        # Hydrate data with TMDB if key is available
+        if self.tmdb_key:
+            self._hydrate_with_tmdb(watched_movies)
+            
         total_films = len(watched_movies)
         total_rating = sum(m['rating'] for m in watched_movies)
         average_rating = round(total_rating / total_films, 2) if total_films > 0 else 0
@@ -158,6 +159,9 @@ class DataEngine:
         genre_counts = {}
         for m in watched_movies:
             for g in m.get('genre', []):
+                # Filter out 'Uncategorized' if we have real data
+                if g == 'Uncategorized' and len(m.get('genre', [])) > 1:
+                    continue
                 genre_counts[g] = genre_counts.get(g, 0) + 1
                 
         # Sort genres by count
@@ -175,3 +179,71 @@ class DataEngine:
             "top_genres": sorted_genres,
             "heatmap_data": heatmap_data
         }
+
+    def _hydrate_with_tmdb(self, movies):
+        """
+        Updates the passed list of movies in-place with Genres and Poster URLs from TMDB.
+        Fetching is done only if necessary to save API calls, but for a sync we might do a batch.
+        """
+        from tmdbv3api import TMDb, Movie, Genre
+        tmdb = TMDb()
+        tmdb.api_key = self.tmdb_key
+        movie_api = Movie()
+        genre_api = Genre()
+        
+        # Get Genre Map once
+        try:
+            genres_list = genre_api.movie_list()
+            # Handle different return types from library versions
+            if isinstance(genres_list, list):
+                genre_map = {g['id']: g['name'] for g in genres_list}
+            elif hasattr(genres_list, 'genres'):
+                 genre_map = {g['id']: g['name'] for g in genres_list.genres}
+            else:
+                 genre_map = {}
+        except:
+            genre_map = {}
+
+        print("Hydrating movies with TMDB data...")
+        
+        # Limit to last 20 for speed in demo, or full sync if robust
+        # Let's do a safe iteration.
+        for movie in movies:
+            # Skip if already hydrated (simple check: genre is not Uncategorized)
+            if movie.get('genre') != ['Uncategorized'] and movie.get('poster_url'):
+                continue
+                
+            try:
+                # Search by title and year if possible
+                results = movie_api.search(movie['title'])
+                
+                # Filter by year if we have it to be precise
+                target_year = movie['year']
+                match = None
+                
+                if results:
+                    if target_year:
+                        # Try to match year
+                        for r in results:
+                            if hasattr(r, 'release_date') and str(target_year) in r.release_date:
+                                match = r
+                                break
+                    
+                    # Fallback to first result
+                    if not match:
+                        match = results[0]
+                        
+                    # Update Metadata
+                    if match:
+                         # Poster
+                         if hasattr(match, 'poster_path') and match.poster_path:
+                             movie['poster_url'] = f"https://image.tmdb.org/t/p/w500{match.poster_path}"
+                         
+                         # Genres
+                         if hasattr(match, 'genre_ids') and genre_map:
+                             real_genres = [genre_map.get(gid) for gid in match.genre_ids if gid in genre_map]
+                             if real_genres:
+                                 movie['genre'] = real_genres
+            except Exception as e:
+                print(f"Failed to hydrate {movie['title']}: {e}")
+                continue
