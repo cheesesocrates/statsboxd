@@ -25,37 +25,93 @@ RUNTIME_DB = {}
 
 @app.route('/')
 def home():
+    # Initial page load
+    # Maybe load default year (latest) here? 
+    # Or just let frontend do it. 
+    # For now, just render basic template and user info
     user_data = RUNTIME_DB
-    watched_movies = user_data.get('watched', [])
-    stats = data_engine.analyze_profile(watched_movies)
-    
-    return render_template('index.html', stats=stats, user=user_data.get('username', 'Guest'))
+    username = user_data.get('username', 'Guest')
+    return render_template('index.html', user=username)
 
-@app.route('/api/refresh', methods=['POST'])
-def refresh_data():
-    username = request.json.get('username')
+@app.route('/api/stats', methods=['GET'])
+def get_stats():
+    watched_movies = RUNTIME_DB.get('watched', [])
+    year = request.args.get('year')
+    if year: year = str(year)
+    
+    stats = data_engine.analyze_profile(watched_movies, year=year)
+    return jsonify(stats)
+
+@app.route('/api/evolution', methods=['GET'])
+def get_evolution():
+    watched = RUNTIME_DB.get('watched', [])
+    evolution = data_engine.get_genre_evolution(watched)
+    return jsonify(evolution)
+
+@app.route('/api/sync/batch', methods=['POST'])
+def sync_batch():
+    data = request.json
+    username = data.get('username')
+    page = data.get('page', 1)
+    
     if not username:
         return jsonify({"status": "error", "message": "Username required"}), 400
     
-    logging.info(f"Scraping for {username}...")
-    watched_movies = scraper.scrape_user(username)
+    # 1. Scrape Page
+    import time
+    t0 = time.time()
+    try:
+        logging.info(f"--- START BATCH: {username} PG {page} ---")
+        result = scraper.scrape_page(username, page)
+        new_entries = result.get('entries', [])
+        has_next = result.get('has_next', False)
+        t_scrape = time.time() - t0
+        logging.info(f"Scrape Page Took: {t_scrape:.2f}s. Entries: {len(new_entries)}")
+    except Exception as e:
+        logging.error(f"Scrape failed: {e}")
+        return jsonify({"status": "error", "message": f"Scraper Error: {str(e)}"}), 500
+
+    # 2. Update Runtime DB
+    # ... (DB Logic) ...
+    if page == 1:
+        RUNTIME_DB.clear()
+        RUNTIME_DB['username'] = username
+        RUNTIME_DB['watched'] = []
     
-    if not watched_movies:
-        return jsonify({"status": "error", "message": "No entries found or private profile"}), 404
-        
-    # Analyze and save
-    stats = data_engine.analyze_profile(watched_movies)
+    if RUNTIME_DB.get('username') != username:
+        RUNTIME_DB.clear()
+        RUNTIME_DB['username'] = username
+        RUNTIME_DB['watched'] = []
+
+    current_watched = RUNTIME_DB.get('watched', [])
+    current_watched.extend(new_entries)
+    RUNTIME_DB['watched'] = current_watched
     
-    # Update Runtime DB
-    RUNTIME_DB.clear() # Clear old data
-    RUNTIME_DB.update({
-        "username": username,
-        "watched": watched_movies,
-        "last_updated": "Just now",
-        "stats": stats
+    # 3. Analyze / Hydrate
+    t1 = time.time()
+    try:
+        data_engine._hydrate_with_tmdb(new_entries)
+        t_hydrate = time.time() - t1
+        logging.info(f"Hydration Took: {t_hydrate:.2f}s")
+    except Exception as e:
+        logging.error(f"Hydration failed: {e}")
+        # Don't fail the request, just log
+    
+    years = sorted(list(set(m['date'][:4] for m in current_watched)), reverse=True)
+    latest_year = years[0] if years else None
+    
+    RUNTIME_DB['available_years'] = years
+    RUNTIME_DB['last_updated'] = "Just now"
+    
+    logging.info(f"--- END BATCH: Total {time.time()-t0:.2f}s ---")
+    
+    return jsonify({
+        "status": "success",
+        "entries": new_entries,
+        "has_next": has_next,
+        "years": years,
+        "latest_year": latest_year
     })
-    
-    return jsonify({"status": "success", "message": f"Scraped {len(watched_movies)} films"})
 
 @app.route('/api/quiz')
 def get_quiz():
@@ -68,21 +124,13 @@ def recommendations():
     watched = RUNTIME_DB.get('watched', [])
     watched_titles = [m['title'] for m in watched]
 
-    profile = data_engine.analyze_profile(watched)
+    # Recs potentially based on "All Time" prefs or "Current Year" prefs?
+    # Usually recs should be based on recent taste or all time. 
+    # Let's use All Time for wider pool.
+    profile = data_engine.analyze_profile(watched, year=None)
     recs = data_engine.get_recommendations(profile['top_genres'], watched_titles)
 
     return jsonify(recs)
-
-# --- Filmle Game Routes ---
-@app.route('/api/game/start', methods=['POST'])
-def start_game():
-    return jsonify(data_engine.start_filmle())
-
-@app.route('/api/game/guess', methods=['POST'])
-def guess_game():
-    data = request.json
-    guess = data.get('guess', '')
-    return jsonify(data_engine.guess_filmle(guess))
 
 if __name__ == '__main__':
     app.run(debug=True, port=5000)

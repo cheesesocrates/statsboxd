@@ -17,103 +17,107 @@ class Scraper:
                 return json.load(f)
         return []
 
-    def scrape_user(self, username):
-        logging.info(f"Starting scrape for user: {username}")
+    def scrape_page(self, username, page):
+        logging.info(f"Starting scrape for user: {username}, Page: {page}")
         base_url = f"https://letterboxd.com/{username}/films/diary/"
         entries = []
-        page = 1
-        cutoff_date = datetime.date.today() - datetime.timedelta(days=365)
+        has_next = False
         
-        while True:
-            url = f"{base_url}page/{page}/"
-            logging.info(f"Scraping page {page}: {url}...")
-            try:
-                response = self.scraper.get(url) # Use cloudscraper
-                if response.status_code != 200:
-                    logging.warning(f"Failed to fetch {url}, status code: {response.status_code}")
-                    break
+        url = f"{base_url}page/{page}/"
+        logging.info(f"Scraping page {page}: {url}...")
+        
+        try:
+            response = self.scraper.get(url) 
+            logging.info(f"Response Status: {response.status_code}, Length: {len(response.text)}")
+            
+            # 404 usually means page doesn't exist (past the end)
+            if response.status_code == 404:
+                return {"entries": [], "has_next": False}
                 
-                soup = BeautifulSoup(response.text, 'html.parser')
-                rows = soup.find_all('tr', class_='diary-entry-row')
+            if response.status_code != 200:
+                logging.warning(f"Failed to fetch {url}, status code: {response.status_code}")
+                return {"entries": [], "has_next": False}
+            
+            soup = BeautifulSoup(response.text, 'html.parser')
+            rows = soup.find_all('tr', class_='diary-entry-row')
+            
+            if not rows:
+                return {"entries": [], "has_next": False}
+            
+            # Check for "Next" button in pagination
+            # Class .paginate-next or next link
+            next_link = soup.find('a', class_='next') 
+            has_next = True if next_link else False
+            
+            # Double check: if 50 rows, maybe next? 
+            # Letterboxd pagination usually exact.
+            
+            for row in rows:
+                # Extract date
+                date_cell = row.find('td', class_='col-daydate')
+                if not date_cell: continue
                 
-                if not rows:
-                    logging.info(f"No more rows found on page {page}. Stopping.")
-                    break
-
-                page_entries = []
-                for row in rows:
-                    # Extract date
-                    date_cell = row.find('td', class_='col-daydate')
-                    if not date_cell: continue
-                    
-                    date_link = date_cell.find('a')
-                    if not date_link: continue
-                    
-                    link_href = date_link['href']
-                    
-                    try:
-                        parts = link_href.strip('/').split('/')
-                        if len(parts) >= 3 and parts[-1].isdigit() and parts[-2].isdigit() and parts[-3].isdigit():
-                            y, m, d = int(parts[-3]), int(parts[-2]), int(parts[-1])
-                            watched_date = datetime.date(y, m, d)
-                        else:
-                            continue
-                    except ValueError:
+                date_link = date_cell.find('a')
+                if not date_link: continue
+                
+                link_href = date_link['href']
+                
+                try:
+                    parts = link_href.strip('/').split('/')
+                    if len(parts) >= 3 and parts[-1].isdigit() and parts[-2].isdigit() and parts[-3].isdigit():
+                        y, m, d = int(parts[-3]), int(parts[-2]), int(parts[-1])
+                        watched_date = datetime.date(y, m, d)
+                    else:
                         continue
-                        
-                    if watched_date < cutoff_date:
-                        logging.info(f"Reached cutoff date {cutoff_date} at entry {watched_date}. Stopping scrape.")
-                        return entries + page_entries
-
-                    # Extract Title
-                    film_col = row.find('td', class_='col-production')
-                    title = "Unknown"
-                    if film_col:
-                        title_header = film_col.find(class_='name')
-                        if title_header:
-                            title_link = title_header.find('a')
-                            if title_link:
-                                title = title_link.get_text(strip=True)
+                except ValueError:
+                    continue
                     
-                    # Extract Year
-                    release_col = row.find('td', class_='col-releaseyear')
-                    year = release_col.get_text(strip=True) if release_col else ""
+                # Extract Title
+                film_col = row.find('td', class_='col-production')
+                title = "Unknown"
+                if film_col:
+                    title_header = film_col.find(class_='name')
+                    if title_header:
+                        title_link = title_header.find('a')
+                        if title_link:
+                            title = title_link.get_text(strip=True)
+                
+                # Extract Year
+                release_col = row.find('td', class_='col-releaseyear')
+                year = release_col.get_text(strip=True) if release_col else ""
 
-                    # Extract Rating
-                    rating_col = row.find('td', class_='col-rating')
-                    rating = 0.0
-                    if rating_col:
-                        rating_span = rating_col.find('span', class_='rating')
-                        if rating_span:
-                            classes = rating_span.get('class', [])
-                            for cls in classes:
-                                if cls.startswith('rated-'):
-                                    try:
-                                        val = int(cls.split('-')[1])
-                                        rating = val / 2.0
-                                    except:
-                                        pass
-                                    break
-                    
-                    entry = {
-                        "title": title,
-                        "year": year,
-                        "rating": rating,
-                        "date": watched_date.strftime("%Y-%m-%d"),
-                        "genre": self._infer_genre(title)
-                    }
-                    page_entries.append(entry)
+                # Extract Rating
+                rating_col = row.find('td', class_='col-rating')
+                rating = 0.0
+                if rating_col:
+                    rating_span = rating_col.find('span', class_='rating')
+                    if rating_span:
+                        classes = rating_span.get('class', [])
+                        for cls in classes:
+                            if cls.startswith('rated-'):
+                                try:
+                                    val = int(cls.split('-')[1])
+                                    rating = val / 2.0
+                                except:
+                                    pass
+                                break
                 
-                logging.info(f"Page {page}: Scraped {len(page_entries)} entries.")
-                entries.extend(page_entries)
-                page += 1
-                
-            except Exception as e:
-                logging.error(f"Error scraping page {page}: {e}")
-                break
-                
-        logging.info(f"Scrape complete. Total entries found: {len(entries)}")
-        return entries
+                entry = {
+                    "title": title,
+                    "year": year,
+                    "rating": rating,
+                    "date": watched_date.strftime("%Y-%m-%d"),
+                    "genre": self._infer_genre(title)
+                }
+                entries.append(entry)
+            
+            logging.info(f"Page {page}: Scraped {len(entries)} entries. Has Next: {has_next}")
+            
+        except Exception as e:
+            logging.error(f"Error scraping page {page}: {e}")
+            return {"entries": [], "has_next": False}
+            
+        return {"entries": entries, "has_next": has_next}
 
     def _infer_genre(self, title):
         for movie in self.movies_db:
