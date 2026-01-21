@@ -115,5 +115,20 @@ def recommendations():
     recs = data_engine.get_recommendations(watched)
     return jsonify(recs)
 
+@app.route('/api/debug/connection')
+def debug_connection():
+    # Diagnostic endpoint to check if Vercel IP is blocked
+    try:
+        url = "https://letterboxd.com/"
+        resp = scraper.scraper.get(url)
+        return jsonify({
+            "status": "success" if resp.status_code == 200 else "error",
+            "http_code": resp.status_code,
+            "url": url,
+            "headers": dict(resp.headers)
+        })
+    except Exception as e:
+        return jsonify({"status": "error", "message": str(e)}), 500
+
 if __name__ == '__main__':
     app.run(debug=True, port=5000)
