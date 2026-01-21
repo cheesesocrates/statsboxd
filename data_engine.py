@@ -237,44 +237,88 @@ class DataEngine:
             "year": year
         }
 
-    def get_genre_evolution(self, watched_movies):
+    def get_genre_evolution(self, watched_movies, year_filter=None):
         """
-        Returns { year: { genre: count, ... }, ... }
+        Returns evolution data.
+        If year_filter is None: { "2023": { "Action": 5, ... }, ... }
+        If year_filter is "2024": { "Jan": { "Action": 1... }, "Feb": ... }
         """
         evolution = {}
-        for m in watched_movies:
-            y = m['date'][:4]
-            if y not in evolution: evolution[y] = {}
+        
+        # Helper for Month Names
+        month_names = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"]
+        
+        target_movies = watched_movies
+        if year_filter:
+            target_movies = [m for m in watched_movies if m['date'].startswith(str(year_filter))]
+            
+            # Initialize all months to ensure continuity
+            for m in month_names:
+                evolution[m] = {}
+        
+        for m in target_movies:
+            date_parts = m['date'].split('-') # YYYY-MM-DD
+            y = date_parts[0]
+            month_idx = int(date_parts[1]) - 1
+            
+            key = y # Default key is Year
+            if year_filter:
+                key = month_names[month_idx]
+            
+            if key not in evolution: evolution[key] = {}
             
             for g in m.get('genre', []):
                 if g == 'Uncategorized': continue
-                evolution[y][g] = evolution[y].get(g, 0) + 1
+                evolution[key][g] = evolution[key].get(g, 0) + 1
         
         return evolution
 
-    def get_recommendations(self, top_genres, watched_titles):
+    def get_recommendations(self, watched_movies):
         """
-        Get recommendations filtering out watched movies strictly.
+        Get recommendations based on STARTLINGLY RECENT taste (Last 25 movies).
+        But exclude ALL watched movies.
         """
         import re
         def normalize(t): return re.sub(r'[^a-z0-9]', '', t.lower())
+        
+        if not watched_movies: return []
             
+        # 1. Exclusion Set (All watched)
+        watched_titles = set(normalize(m['title']) for m in watched_movies)
+        
+        # 2. Taste Source (First 25, assuming movies[0] is latest)
+        # Note: Scraper usually appends? Wait.
+        # Scraper fetches Page 1, then Page 2...
+        # Page 1 contains [Newest ... Older].
+        # So index 0 is indeed Newest.
+        recent_batch = watched_movies[:25]
+        
+        # 3. Calculate Top Genres from Recent Batch
+        genre_counts = {}
+        for m in recent_batch:
+            for g in m.get('genre', []):
+                if g == 'Uncategorized': continue
+                genre_counts[g] = genre_counts.get(g, 0) + 1
+        
+        # Sort and take top 3-5
+        sorted_genres = sorted(genre_counts.items(), key=lambda x: x[1], reverse=True)
+        top_genres_names = set(g[0] for g in sorted_genres[:5])
+        
         rec_candidates = []
-        watched_set = set(normalize(t) for t in watched_titles)
         
         for movie in self.movies_db:
-             if normalize(movie['title']) in watched_set:
+             if normalize(movie['title']) in watched_titles:
                 continue
              
              movie_genres = set(movie.get('genre', []))
-             # Fix: top_genres is now fully sorted list, take top 5
-             top_5_genres = set(g[0] for g in top_genres[:5]) if top_genres else set()
              
-             if not top_5_genres:
+             if not top_genres_names:
+                 # Random fallback if no genre info
                  rec_candidates.append(movie)
                  continue
                  
-             if movie_genres.intersection(top_5_genres):
+             # Check intersection
+             if movie_genres.intersection(top_genres_names):
                  rec_candidates.append(movie)
         
         random.shuffle(rec_candidates)

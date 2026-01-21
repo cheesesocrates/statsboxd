@@ -39,10 +39,7 @@
                         id="heatmap-subtitle">THIS YEAR</span></h3>
             </div>
             <div class="flex flex-col items-end gap-2">
-                <button onclick="openHistoryModal()"
-                    class="text-xs font-mono text-accent hover:underline border border-accent px-2 py-1 rounded hover:bg-accent/10 transition-colors">
-                    VIEW FULL HISTORY
-                </button>
+                <!-- History Button Removed -->
                 <div class="text-[10px] font-mono flex gap-1 items-center opacity-60">
                     <span>LESS</span>
                     <div class="w-2 h-2 bg-heat0"></div>
@@ -161,6 +158,9 @@
 
             // Reload Recs (uses full profile mostly, but refreshes checks)
             loadRecommendations();
+
+            // Reload Evolution (Year Specific)
+            loadEvolution(year);
 
         } catch (e) {
             console.error("Failed to update dashboard", e);
