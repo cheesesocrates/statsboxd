@@ -9,7 +9,14 @@ class Scraper:
     def __init__(self, movies_path='movies.json'):
         self.movies_path = movies_path
         self.movies_db = self._load_movies_db()
-        self.scraper = cloudscraper.create_scraper() # Create a CloudScraper instance
+        # Attempt to mimic a real desktop browser to bypass Cloudflare on Vercel
+        self.scraper = cloudscraper.create_scraper(
+            browser={
+                'browser': 'chrome',
+                'platform': 'windows',
+                'desktop': True
+            }
+        )
 
     def _load_movies_db(self):
         if os.path.exists(self.movies_path):
