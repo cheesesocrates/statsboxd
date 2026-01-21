@@ -185,18 +185,22 @@
         const monthsDiv = document.getElementById('heatmap-months');
         monthsDiv.innerHTML = '';
 
+        // Ensure tooltip exists
+        let tooltip = document.getElementById('global-tooltip');
+        if (!tooltip) {
+            tooltip = document.createElement('div');
+            tooltip.id = 'global-tooltip';
+            tooltip.className = 'fixed z-50 bg-black/90 border border-gray-700 text-white text-xs font-mono p-2 rounded pointer-events-none hidden shadow-xl max-w-xs';
+            document.body.appendChild(tooltip);
+        }
+
         const year = parseInt(yearStr);
         const start = new Date(year, 0, 1); // Jan 1st
         const end = new Date(year, 11, 31); // Dec 31st
 
-        // Populate Grid
-        // We need exactly 52 or 53 weeks.
-        // Or just map every day of the year.
-        // Let's iterate day by day.
-
         let current = new Date(start);
 
-        // Labels logic: Simplified. Just add 12 items.
+        // Labels
         const months = ["JAN", "FEB", "MAR", "APR", "MAY", "JUN", "JUL", "AUG", "SEP", "OCT", "NOV", "DEC"];
         months.forEach(m => {
             const s = document.createElement('span');
@@ -206,19 +210,49 @@
 
         while (current <= end) {
             const dateStr = current.toISOString().split('T')[0];
-            const count = data[dateStr] || 0;
+            // New Data Format: { count: N, movies: [...] } or undefined
+            const entry = data[dateStr];
+            const count = entry ? entry.count : 0;
+            const movies = entry ? entry.movies : [];
 
             const div = document.createElement('div');
-            div.className = `w-full aspect-square rounded-[1px] md:rounded-sm transition-colors duration-200`;
+            div.className = `w-full aspect-square rounded-[1px] md:rounded-sm transition-opacity hover:opacity-80`;
 
             if (count === 0) div.classList.add('bg-heat0');
             else if (count === 1) div.classList.add('bg-heat1');
             else if (count === 2) div.classList.add('bg-heat2');
             else div.classList.add('bg-heat3');
 
-            div.title = `${dateStr}: ${count}`;
-            grid.appendChild(div);
+            // Interactive Tooltip
+            div.onmouseenter = (e) => {
+                tooltip.classList.remove('hidden');
+                let content = `<strong>${dateStr}</strong><br/>${count} films`;
+                if (movies.length > 0) {
+                    content += `<div class="mt-1 pt-1 border-t border-gray-600 opacity-80">`;
+                    // Show up to 3
+                    movies.slice(0, 3).forEach(m => {
+                        content += `<div class="truncate">- ${m}</div>`;
+                    });
+                    if (movies.length > 3) content += `<div>+ ${movies.length - 3} more</div>`;
+                    content += `</div>`;
+                }
+                tooltip.innerHTML = content;
+            };
 
+            div.onmousemove = (e) => {
+                // Position near mouse
+                const x = e.clientX + 10;
+                const y = e.clientY + 10;
+                // Check bounds (basic)
+                tooltip.style.left = Math.min(x, window.innerWidth - 200) + 'px';
+                tooltip.style.top = Math.min(y, window.innerHeight - 100) + 'px';
+            };
+
+            div.onmouseleave = () => {
+                tooltip.classList.add('hidden');
+            };
+
+            grid.appendChild(div);
             current.setDate(current.getDate() + 1);
         }
     }

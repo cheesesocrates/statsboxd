@@ -163,8 +163,8 @@ class DataEngine:
             except:
                 pass
 
-        # Run in parallel
-        with concurrent.futures.ThreadPoolExecutor(max_workers=10) as executor:
+        # Run in parallel to speed up (Increased workers)
+        with concurrent.futures.ThreadPoolExecutor(max_workers=20) as executor:
             executor.map(process_movie, to_hydrate)
             
         logging.info(f"Hydration complete for {len(to_hydrate)} movies.")
@@ -173,11 +173,6 @@ class DataEngine:
     def analyze_profile(self, watched_movies, year=None):
         """
         Analyzes statistics and hydrates data. 
-        If year is provided, filters data to that year for stats, 
-        BUT returns heatmap data for that year specifically? 
-        Or should heatmap always be full history? 
-        User asked for "Display latest year... option to go back and forth".
-        So the whole dashboard filters by year.
         """
         logging.info(f"Analyzing profile for {len(watched_movies) if watched_movies else 0} movies. Year filter: {year}")
         
@@ -208,31 +203,26 @@ class DataEngine:
                 if g == 'Uncategorized' and len(m.get('genre', [])) > 1: continue
                 genre_counts[g] = genre_counts.get(g, 0) + 1
         
-        # Format for D3 Graph: Nodes and Links?
-        # For now just return the counts, frontend handles D3
         sorted_genres = sorted(genre_counts.items(), key=lambda x: x[1], reverse=True)
         
         logging.info(f"Analysis done for {year if year else 'ALL'}. Films: {total_films}")
         
-        # Heatmap Data
-        # If year is selected, show only that year's heatmap? 
-        # Or show full 12 months of that year.
-        import datetime
+        # Heatmap Data (Enriched for Hover)
         heatmap_data = {}
         
-        # If specific year, 365 days of THAT year.
-        # If no year (All Time?), maybe just last 365 days or everything?
-        # User said "Last year ones... go back and forth".
-        # So usually we view a specific year. Default to current year or previous 365?
-        # Let's support returning the dict, frontend renders.
-        
         for m in target_movies:
-            heatmap_data[m['date']] = heatmap_data.get(m['date'], 0) + 1
+            d = m['date']
+            if d not in heatmap_data:
+                heatmap_data[d] = {'count': 0, 'movies': []}
+            
+            heatmap_data[d]['count'] += 1
+            # Add title if not already present (unlikely on same day unless rewatch)
+            heatmap_data[d]['movies'].append(m['title'])
             
         return {
             "total_films": total_films,
             "average_rating": average_rating,
-            "top_genres": sorted_genres, # Full list for graph
+            "top_genres": sorted_genres,
             "heatmap_data": heatmap_data,
             "year": year
         }
