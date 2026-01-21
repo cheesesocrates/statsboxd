@@ -512,8 +512,10 @@
                     page++;
                 }
 
-                // Small delay
-                await new Promise(r => setTimeout(r, 100));
+                // RATE LIMITING PROTECTION:
+                // Wait 2 seconds between pages to prevent Cloudflare 403 blocks.
+                // "Behave like a human, not a bot."
+                await new Promise(r => setTimeout(r, 2000));
             }
 
             btn.textContent = "SYNC_DATA";
