@@ -33,7 +33,9 @@ def get_stats():
     year = request.args.get('year')
     if year: year = str(year)
     
-    stats = data_engine.analyze_profile(watched_movies, year=year)
+    include_undated = request.args.get('include_undated', 'false').lower() == 'true'
+    
+    stats = data_engine.analyze_profile(watched_movies, year=year, include_undated=include_undated)
     return jsonify(stats)
 
 @app.route('/api/evolution', methods=['GET'])
@@ -49,6 +51,7 @@ def sync_batch():
     data = request.json
     username = data.get('username')
     page = data.get('page', 1)
+    source = data.get('source', 'diary') # 'diary' or 'films'
     
     if not username:
         return jsonify({"status": "error", "message": "Username required"}), 400
@@ -56,8 +59,12 @@ def sync_batch():
     # 1. Scrape Page
     t0 = time.time()
     try:
-        logging.info(f"--- START BATCH: {username} PG {page} ---")
-        result = scraper.scrape_page(username, page)
+        logging.info(f"--- START BATCH: {username} [{source}] PG {page} ---")
+        if source == 'films':
+            result = scraper.scrape_films_page(username, page)
+        else:
+            result = scraper.scrape_page(username, page)
+            
         new_entries = result.get('entries', [])
         has_next = result.get('has_next', False)
         t_scrape = time.time() - t0
@@ -67,27 +74,47 @@ def sync_batch():
         return jsonify({"status": "error", "message": f"Scraper Error: {str(e)}"}), 500
 
     # 2. Update Runtime DB
-    # Handle New User or Reset
-    if page == 1 or RUNTIME_DB.get('username') != username:
+    # Only clear on Diary Page 1 (Start of full sync)
+    if source == 'diary' and page == 1:
         RUNTIME_DB.clear()
         RUNTIME_DB['username'] = username
         RUNTIME_DB['watched'] = []
     
+    # Safety Check
+    if RUNTIME_DB.get('username') != username:
+         RUNTIME_DB.clear()
+         RUNTIME_DB['username'] = username
+         RUNTIME_DB['watched'] = []
+    
     current_watched = RUNTIME_DB.get('watched', [])
-    current_watched.extend(new_entries)
+    
+    # Deduplication Logic
+    # If source is 'films', we only add if NOT in 'diary' (current_watched)
+    # We prioritize Diary entries because they have dates.
+    seen_titles = set(m['title'].lower() for m in current_watched)
+    
+    unique_entries = []
+    for entry in new_entries:
+        if entry['title'].lower() not in seen_titles:
+            unique_entries.append(entry)
+            seen_titles.add(entry['title'].lower()) # Mark as seen
+    
+    current_watched.extend(unique_entries)
     RUNTIME_DB['watched'] = current_watched
     
     # 3. Analyze / Hydrate
+    # Hydrate unique_entries only
     t1 = time.time()
     try:
-        data_engine._hydrate_with_tmdb(new_entries)
+        data_engine._hydrate_with_tmdb(unique_entries)
         t_hydrate = time.time() - t1
         logging.info(f"Hydration Took: {t_hydrate:.2f}s")
     except Exception as e:
         logging.error(f"Hydration failed: {e}")
         # Don't fail the request, just log
     
-    years = sorted(list(set(m['date'][:4] for m in current_watched)), reverse=True)
+    # Extract years (excluding None/Undated for the list)
+    years = sorted(list(set(m['date'][:4] for m in current_watched if m['date'])), reverse=True)
     latest_year = years[0] if years else None
     
     RUNTIME_DB['available_years'] = years
@@ -97,7 +124,7 @@ def sync_batch():
     
     return jsonify({
         "status": "success",
-        "entries": new_entries,
+        "entries": unique_entries,
         "has_next": has_next,
         "years": years,
         "latest_year": latest_year

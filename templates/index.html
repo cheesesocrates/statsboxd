@@ -7,7 +7,10 @@
 <!-- Header / Search -->
 <section class="flex flex-col md:flex-row gap-4 justify-between items-end border-b border-gray-800 pb-8">
     <div class="w-full md:w-1/2">
-        <h2 class="text-3xl font-bold text-white mb-2">My Diary Analytics</h2>
+        <h2 class="text-3xl font-bold text-white mb-2">
+            My Diary Analytics
+            <span id="header-total" class="text-lg font-mono text-accent ml-2 opacity-90"></span>
+        </h2>
         <div class="flex items-center gap-4">
             <div class="flex items-center gap-2 bg-gray-800 rounded px-2 py-1" id="year-nav"
                 style="visibility: hidden;">
@@ -15,7 +18,16 @@
                 <span id="current-year-display" class="font-mono text-white font-bold">ALL TIME</span>
                 <button onclick="changeYear(-1)" class="text-accent hover:text-white font-mono text-xl">&gt;</button>
             </div>
-            <p class="text-sm font-mono opacity-60">Displaying data for selected year.</p>
+
+            <div class="flex flex-col gap-0.5">
+                <label class="flex items-center gap-2 cursor-pointer group">
+                    <input type="checkbox" id="toggle-undated" class="accent-accent w-4 h-4"
+                        onchange="updateDashboard()">
+                    <span class="text-[10px] font-mono text-gray-400 group-hover:text-white transition-colors">USE
+                        RELEASE DATES</span>
+                </label>
+                <span id="undated-stat" class="text-[10px] font-mono text-accent">0 Not Logged</span>
+            </div>
         </div>
     </div>
     <div class="w-full md:w-auto flex gap-2">
@@ -147,6 +159,9 @@
 
             // Render Stats
             document.getElementById('stat-total').textContent = stats.total_films;
+            if (stats.grand_total) {
+                document.getElementById('header-total').textContent = `[${stats.grand_total} WATCHED]`;
+            }
             document.getElementById('stat-avg').textContent = stats.average_rating;
             document.getElementById('heatmap-subtitle').textContent = year;
 
@@ -452,6 +467,7 @@
     }
 
     // --- Scrape Logic (Modified for Batching) ---
+    // --- Scrape Logic (Modified for Batching) ---
     async function fetchData() {
         const btn = document.getElementById('scrape-btn');
         const input = document.getElementById('username-input');
@@ -462,47 +478,46 @@
         btn.textContent = "SYNCING...";
         btn.disabled = true;
 
-        let page = 1;
-        let keepFetching = true;
-        let totalMovies = 0;
+        // Helper for sync loop
+        async function runSyncLoop(source) {
+            let page = 1;
+            let keepFetching = true;
 
-        try {
-            // LOOP
             while (keepFetching) {
-                btn.textContent = `SYNCING PG ${page}...`;
+                const label = source === 'diary' ? `DIARY PG ${page}` : `FILMS PG ${page}`;
+                btn.textContent = `SYNCING ${label}...`;
 
                 const response = await fetch('/api/sync/batch', {
                     method: 'POST',
                     headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ username, page })
+                    body: JSON.stringify({ username, page, source })
                 });
 
                 if (!response.ok) {
-                    keepFetching = false;
                     const text = await response.text();
                     console.error("HTTP Error:", response.status, text);
-                    alert(`Error ${response.status}: ${text.substring(0, 100)}...`);
+                    // If 403, we must stop and warn
+                    if (response.status === 403) {
+                        alert("Rate Limited (403). Please wait a while.");
+                        return false;
+                    }
                     break;
                 }
 
                 const result = await response.json();
 
                 if (result.status === "error") {
-                    keepFetching = false;
                     console.error("API Error:", result);
                     alert("API Error: " + result.message);
-                    break;
+                    return false;
                 }
 
-                if (result.entries && result.entries.length > 0) {
-                    totalMovies += result.entries.length;
-
+                if (result.entries) {
                     // Update State & UI
                     availableYears = result.years;
                     currentYearIndex = 0; // Latest
-
                     document.getElementById('year-nav').style.visibility = 'visible';
-                    updateDashboard(result.latest_year);
+                    updateDashboard(result.latest_year); // Live update
                     loadEvolution();
                 }
 
@@ -512,18 +527,29 @@
                     page++;
                 }
 
-                // RATE LIMITING PROTECTION:
-                // Wait 2 seconds between pages to prevent Cloudflare 403 blocks.
-                // "Behave like a human, not a bot."
+                // RATE LIMITING PROTECTION (2s)
                 await new Promise(r => setTimeout(r, 2000));
             }
+            return true;
+        }
+
+        try {
+            // PHASE 1: DIARY (Dates)
+            if (!await runSyncLoop('diary')) throw new Error("Diary Sync Failed");
+
+            // PHASE 2: FILMS (Undated / Catch-up)
+            // User requested to scan for films without dates
+            if (!await runSyncLoop('films')) throw new Error("Films Sync Failed");
 
             btn.textContent = "SYNC_DATA";
             btn.disabled = false;
 
+            // Final Refresh to ensure totals are correct
+            // (Handled by last updateDashboard call in loop)
+            alert("Sync Complete! Included undated films.");
+
         } catch (e) {
             console.error("Fetch Logic Error:", e);
-            alert("Network Error: " + e.message);
             btn.textContent = "SYNC_DATA";
             btn.disabled = false;
         }

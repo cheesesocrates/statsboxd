@@ -71,13 +71,36 @@ class Scraper:
                 
                 try:
                     parts = link_href.strip('/').split('/')
-                    if len(parts) >= 3 and parts[-1].isdigit() and parts[-2].isdigit() and parts[-3].isdigit():
-                        y, m, d = int(parts[-3]), int(parts[-2]), int(parts[-1])
+                    # Normalize parts to find date components
+                    # Expected: .../YYYY/MM/DD/ or .../YYYY/MM/ or .../YYYY/
+                    # Find year (4 digits)
+                    y, m, d = None, 1, 1
+                    
+                    found_year_idx = -1
+                    for i in range(len(parts)-1, -1, -1):
+                        if parts[i].isdigit() and len(parts[i]) == 4:
+                            y = int(parts[i])
+                            found_year_idx = i
+                            break
+                    
+                    if y:
+                        # Try to find month/day after year
+                        if found_year_idx + 1 < len(parts) and parts[found_year_idx+1].isdigit():
+                            m = int(parts[found_year_idx+1])
+                            if found_year_idx + 2 < len(parts) and parts[found_year_idx+2].isdigit():
+                                d = int(parts[found_year_idx+2])
+                        
                         watched_date = datetime.date(y, m, d)
                     else:
-                        continue
+                        watched_date = None
                 except ValueError:
-                    continue
+                     watched_date = None
+                
+                # If date parsing failed, don't skip! Add as Undated.
+                if not watched_date:
+                     # Attempt fallback from text? "Jan 01" -> hard without Year context.
+                     # Just assume None
+                     pass
                     
                 # Extract Title
                 film_col = row.find('td', class_='col-production')
@@ -122,6 +145,128 @@ class Scraper:
             
         except Exception as e:
             logging.error(f"Error scraping page {page}: {e}")
+            return {"entries": [], "has_next": False}
+            
+        return {"entries": entries, "has_next": has_next}
+
+    def scrape_films_page(self, username, page):
+        """
+        Scrapes the 'Films' page (All watched films, including undated).
+        URL: /username/films/page/X/
+        """
+        logging.info(f"Starting FILMS scrape for user: {username}, Page: {page}")
+        
+        if page == 1:
+            url = f"https://letterboxd.com/{username}/films/"
+        else:
+            url = f"https://letterboxd.com/{username}/films/page/{page}/"
+            
+        entries = []
+        has_next = False
+        
+        try:
+            response = self.scraper.get(url)
+            logging.info(f"Response Status: {response.status_code}")
+            
+            # Check 404 (End of pages)
+            if response.status_code == 404:
+                return {"entries": [], "has_next": False}
+
+            soup = BeautifulSoup(response.text, 'html.parser')
+            logging.info(f"Page Title: {soup.title.string if soup.title else 'No Title'}")
+            
+            # Pagination check
+            next_link = soup.find('a', class_='next')
+            has_next = True if next_link else False
+            
+            # Selectors
+            # Try Grid View (li.griditem) - Common in /films/
+            posters = soup.select('li.griditem')
+            
+            # Fallback to List View (li.poster-container)
+            if not posters:
+                logging.info("No .griditem found. Trying .poster-container.")
+                posters = soup.select('li.poster-container')
+
+            if not posters:
+                logging.info("No posters found. Trying .poster-list li.")
+                posters = soup.select('.poster-list li')
+            
+            logging.info(f"Found {len(posters)} poster containers.")
+            
+            for li in posters:
+                # 1. Try data-item-name (Common in React grids/LazyPoster)
+                div = li.find('div', attrs={'data-item-name': True})
+                
+                # 2. Try data-film-name (Older/List views)
+                if not div:
+                    div = li.find('div', attrs={'data-film-name': True})
+                
+                # 3. Fallback try class
+                if not div:
+                    div = li.find('div', class_='film-poster')
+                
+                # 4. Fallback to Image
+                
+                title = "Unknown"
+                year = ""
+                
+                if div:
+                    title = div.get('data-item-name') or div.get('data-film-name') or "Unknown"
+                    year = div.get('data-film-release-year', '')
+                else:
+                    # Fallback to Image
+                    img = li.find('img')
+                    if img:
+                        title = img.get('alt', 'Unknown')
+                
+                if title == "Unknown": continue
+
+                # Clean title if it includes year (e.g. "Name (2024)")
+                if title and title.endswith(')') and '(' in title:
+                     try:
+                         # Last part might be (YYYY)
+                         # Simple check
+                         parts = title.rsplit('(', 1)
+                         if len(parts) == 2:
+                             possible_year = parts[1].rstrip(')')
+                             if possible_year.isdigit() and len(possible_year) == 4:
+                                 title = parts[0].strip()
+                                 if not year: year = possible_year
+                     except: pass
+
+                # Rating
+                rating = 0.0
+                try:
+                    # In film grid, rating is hidden or in a specific span
+                    # Usually .poster-viewingdata > .rating
+                    viewing_data = li.find('p', class_='poster-viewingdata')
+                    if viewing_data:
+                         rating_span = viewing_data.find('span', class_='rating')
+                         if rating_span:
+                             classes = rating_span.get('class', [])
+                             for cls in classes:
+                                 if cls.startswith('rated-'):
+                                     rating = int(cls.split('-')[1]) / 2.0
+                                     break
+                except:
+                    pass
+                
+                entry = {
+                    "title": title,
+                    "year": year,
+                    "rating": rating,
+                    "date": None, # Undated
+                    "genre": self._infer_genre(title)
+                }
+                entries.append(entry)
+                
+            logging.info(f"Page {page} (Films): Scraped {len(entries)} entries.")
+            
+        except Exception as e:
+            logging.error(f"CRITICAL ERROR scraping films page {page}: {e}")
+            import traceback
+            # traceback.print_exc()
             return {"entries": [], "has_next": False}
             
         return {"entries": entries, "has_next": has_next}

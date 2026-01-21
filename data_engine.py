@@ -156,6 +156,8 @@ class DataEngine:
                     if match:
                          if hasattr(match, 'poster_path') and match.poster_path:
                              movie['poster_url'] = f"https://image.tmdb.org/t/p/w500{match.poster_path}"
+                         if hasattr(match, 'release_date') and match.release_date:
+                             movie['release_date'] = match.release_date
                          if hasattr(match, 'genre_ids') and genre_map:
                              real_genres = [genre_map.get(gid) for gid in match.genre_ids if gid in genre_map]
                              if real_genres:
@@ -170,15 +172,20 @@ class DataEngine:
         logging.info(f"Hydration complete for {len(to_hydrate)} movies.")
 
 
-    def analyze_profile(self, watched_movies, year=None):
+    def analyze_profile(self, watched_movies, year=None, include_undated=False):
         """
         Analyzes statistics and hydrates data. 
         """
-        logging.info(f"Analyzing profile for {len(watched_movies) if watched_movies else 0} movies. Year filter: {year}")
+        grand_total = len(watched_movies) if watched_movies else 0
+        undated_count = sum(1 for m in watched_movies if not m.get('date'))
+        
+        logging.info(f"Analyzing profile. Total: {grand_total}. Undated: {undated_count}. Year: {year}. Include Undamed: {include_undated}")
         
         if not watched_movies:
             return {
                 "total_films": 0,
+                "grand_total": 0,
+                "undated_count": 0,
                 "average_rating": 0,
                 "top_genres": [],
                 "heatmap_data": {}
@@ -188,10 +195,23 @@ class DataEngine:
             self._hydrate_with_tmdb(watched_movies)
             
         # Filter by year if requested
-        target_movies = watched_movies
-        if year:
-            target_movies = [m for m in watched_movies if m['date'].startswith(str(year))]
+        # SPECIAL LOGIC: If include_undated is True, we might need to include undated films 
+        # that "fall into" this year based on release_date
+        target_movies = []
+        for m in watched_movies:
+            d = m.get('date')
             
+            # If no date, try fallback
+            if not d and include_undated and m.get('release_date'):
+               d = m['release_date']
+            
+            # If still no date, strict filter skips it unless we are not filtering by year
+            if year:
+                if d and d.startswith(str(year)):
+                    target_movies.append(m)
+            else:
+                target_movies.append(m) # All time
+
         total_films = len(target_movies)
         total_rating = sum(m['rating'] for m in target_movies)
         average_rating = round(total_rating / total_films, 2) if total_films > 0 else 0
@@ -211,16 +231,25 @@ class DataEngine:
         heatmap_data = {}
         
         for m in target_movies:
-            d = m['date']
+            # Determine date for heatmap placement
+            d = m.get('date')
+            if not d:
+                if include_undated and m.get('release_date'):
+                    d = m['release_date']
+                else:
+                    continue # Skip if really no date
+                
             if d not in heatmap_data:
                 heatmap_data[d] = {'count': 0, 'movies': []}
             
             heatmap_data[d]['count'] += 1
-            # Add title if not already present (unlikely on same day unless rewatch)
+            # Add title
             heatmap_data[d]['movies'].append(m['title'])
             
         return {
             "total_films": total_films,
+            "grand_total": grand_total,
+            "undated_count": undated_count,
             "average_rating": average_rating,
             "top_genres": sorted_genres,
             "heatmap_data": heatmap_data,
@@ -247,6 +276,8 @@ class DataEngine:
                 evolution[m] = {}
         
         for m in target_movies:
+            if not m.get('date'): continue
+            
             date_parts = m['date'].split('-') # YYYY-MM-DD
             y = date_parts[0]
             month_idx = int(date_parts[1]) - 1
