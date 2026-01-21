@@ -225,7 +225,6 @@
 
     // --- D3 Network Graph ---
     function renderGenreNetwork(genres) {
-        // genres is [[name, count], ...]
         const container = document.getElementById('genre-network');
         container.innerHTML = '';
         const width = container.clientWidth;
@@ -237,18 +236,19 @@
         const topGenres = genres.slice(0, 10);
 
         // Prepare nodes
+        // Smaller radius scale: max 35-45px
+        const maxVal = Math.max(...topGenres.map(n => n[1]));
+        const radiusScale = d3.scaleSqrt().domain([0, maxVal]).range([12, 45]);
+
         const nodes = topGenres.map(g => ({ id: g[0], val: g[1] }));
 
-        // Scale radius better
-        // Find max value to normalize
-        const maxVal = Math.max(...nodes.map(n => n.val));
-        const radiusScale = d3.scaleSqrt().domain([0, maxVal]).range([15, 60]); // Scale up to 60px
-
-        // Simple force simulation
+        // Force Simulation: make it floaty/roaming
         const simulation = d3.forceSimulation(nodes)
             .force('charge', d3.forceManyBody().strength(5))
             .force('center', d3.forceCenter(width / 2, height / 2))
-            .force('collision', d3.forceCollide().radius(d => radiusScale(d.val) + 2).strength(0.7)); // Add padding
+            .force('collision', d3.forceCollide().radius(d => radiusScale(d.val) + 1).strength(0.8))
+            .alphaDecay(0.01) // Slower decay = moves longer
+            .velocityDecay(0.6);
 
         const svg = d3.select('#genre-network').append('svg')
             .attr('width', width)
@@ -258,38 +258,37 @@
             .selectAll('g')
             .data(nodes)
             .join('g')
-            .attr('cursor', 'pointer')
+            .attr('cursor', 'grab')
             .call(d3.drag()
                 .on('start', dragstarted)
                 .on('drag', dragged)
                 .on('end', dragended));
 
-        // Circles (OPAQUE as requested)
+        // Circles (Unchanged: Opaque, Tableau10 colors)
         node.append('circle')
             .attr('r', d => radiusScale(d.val))
             .attr('fill', (d, i) => d3.schemeTableau10[i % 10])
             .attr('opacity', 1.0)
-            .attr('stroke', '#1a1a1a')
-            .attr('stroke-width', 2);
+            .attr('stroke', 'none');
 
-        // Labels (Only show if radius > 20)
+        // Labels (BLACK TEXT, SLEEK, NO OUTLINE)
         node.append('text')
             .text(d => d.id)
             .attr('text-anchor', 'middle')
             .attr('dy', '.35em')
-            .attr('fill', 'white')
-            .style('font-size', d => Math.min(14, radiusScale(d.val) / 2) + 'px') // Dynamic font size
-            .style('font-family', 'monospace')
-            .style('font-weight', 'bold')
+            .attr('fill', 'black')
+            .style('font-size', d => Math.min(12, radiusScale(d.val) / 2.2) + 'px')
+            .style('font-family', 'sans-serif') // Sleek
+            .style('font-weight', '600')
             .style('pointer-events', 'none')
-            .style('text-shadow', '1px 1px 0 #000, -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000') // Outline
-            .style('display', d => radiusScale(d.val) > 20 ? 'block' : 'none');
+            .style('display', d => radiusScale(d.val) > 15 ? 'block' : 'none');
 
         simulation.on('tick', () => {
             node.attr('transform', d => {
-                // Keep within bounds
-                d.x = Math.max(radiusScale(d.val), Math.min(width - radiusScale(d.val), d.x));
-                d.y = Math.max(radiusScale(d.val), Math.min(height - radiusScale(d.val), d.y));
+                // Bounded box
+                const r = radiusScale(d.val);
+                d.x = Math.max(r, Math.min(width - r, d.x));
+                d.y = Math.max(r, Math.min(height - r, d.y));
                 return `translate(${d.x},${d.y})`;
             });
         });
@@ -298,6 +297,7 @@
             if (!event.active) simulation.alphaTarget(0.3).restart();
             d.fx = d.x;
             d.fy = d.y;
+            d3.select(this).attr("cursor", "grabbing");
         }
 
         function dragged(event, d) {
@@ -309,20 +309,38 @@
             if (!event.active) simulation.alphaTarget(0);
             d.fx = null;
             d.fy = null;
+            d3.select(this).attr("cursor", "grab");
         }
     }
 
     // --- Evolution Chart (Chart.js) ---
-    async function loadEvolution() {
+    async function loadEvolution(yearFilter) {
         try {
-            const res = await fetch('/api/evolution');
+            // If yearFilter is "ALL TIME" or undefined, fetch all.
+            // If specific year (e.g. "2024"), fetch monthly evolution for that year.
+            let url = '/api/evolution';
+            if (yearFilter && yearFilter !== "ALL TIME") {
+                url += `?year=${yearFilter}`;
+            }
+
+            const res = await fetch(url);
             const data = await res.json();
 
             // Transform for Chart.js
-            // Data: { year: {genre: count} }
-            const years = Object.keys(data).sort();
+            // Data Keys are either Years (2023, 2024) OR Months (Jan, Feb...)
+            const monthOrder = ["Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec"];
+            let labels = Object.keys(data);
 
-            // Find top genres overall to limit lines
+            // Heuristic to detect if Monthly or Yearly
+            const isMonthly = labels.some(l => monthOrder.includes(l));
+
+            if (isMonthly) {
+                labels.sort((a, b) => monthOrder.indexOf(a) - monthOrder.indexOf(b));
+            } else {
+                labels.sort();
+            }
+
+            // Find top genres
             const totalCounts = {};
             Object.values(data).forEach(yData => {
                 Object.entries(yData).forEach(([g, c]) => {
@@ -331,18 +349,25 @@
             });
             const topGenres = Object.entries(totalCounts)
                 .sort((a, b) => b[1] - a[1])
-                .slice(0, 5) // Top 5 only
+                .slice(0, 5) // Top 5
                 .map(x => x[0]);
 
+            // Enhanced Palette (Vibrant)
+            const colors = ['#22d3ee', '#f472b6', '#a78bfa', '#facc15', '#4ade80'];
+
             const datasets = topGenres.map((genre, i) => {
-                const colors = ['#ec4899', '#22d3ee', '#fb923c', '#a3e635', '#c084fc'];
+                const color = colors[i % colors.length];
                 return {
                     label: genre,
-                    data: years.map(y => data[y][genre] || 0),
-                    borderColor: colors[i % colors.length],
-                    backgroundColor: colors[i % colors.length] + '20',
+                    data: labels.map(lbl => data[lbl][genre] || 0),
+                    borderColor: color,
+                    backgroundColor: color + '20',
                     tension: 0.4,
-                    fill: true
+                    fill: true,
+                    pointRadius: 4,
+                    pointBackgroundColor: '#000',
+                    pointBorderColor: color,
+                    pointBorderWidth: 2
                 };
             });
 
@@ -353,24 +378,36 @@
             evolutionChartInstance = new Chart(ctx, {
                 type: 'line',
                 data: {
-                    labels: years,
+                    labels: labels,
                     datasets: datasets
                 },
                 options: {
                     responsive: true,
                     maintainAspectRatio: false,
                     plugins: {
-                        legend: { labels: { color: 'white', font: { family: 'monospace' } } }
+                        legend: { labels: { color: 'white', font: { family: 'monospace' } } },
+                        tooltip: {
+                            mode: 'index',
+                            intersect: false,
+                            backgroundColor: 'rgba(0,0,0,0.9)',
+                            titleFont: { family: 'monospace' },
+                            bodyFont: { family: 'monospace' }
+                        }
                     },
                     scales: {
                         y: {
                             grid: { color: '#333' },
-                            ticks: { color: '#888' }
+                            ticks: { color: '#888', font: { family: 'monospace' } }
                         },
                         x: {
                             grid: { color: '#333' },
-                            ticks: { color: '#888' }
+                            ticks: { color: '#888', font: { family: 'monospace' } }
                         }
+                    },
+                    interaction: {
+                        mode: 'nearest',
+                        axis: 'x',
+                        intersect: false
                     }
                 }
             });
